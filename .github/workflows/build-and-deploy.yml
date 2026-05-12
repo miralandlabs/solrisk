@@ -1,0 +1,104 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    outputs:
+      deployment_url: ${{ steps.deploy_vercel.outputs.deployment_url }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check and lint
+        run: |
+          cargo check --bin risk_api
+          cargo clippy --bin risk_api -- -D warnings
+
+      - name: Run tests
+        run: cargo test --lib
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Link to Existing Vercel Project
+        run: |
+          mkdir -p .vercel
+          cat > .vercel/project.json << EOF
+          {
+            "orgId": "${{ secrets.ORG_ID }}",
+            "projectId": "${{ secrets.PROJECT_ID }}"
+          }
+          EOF
+
+      - name: Set Environment Variables
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "VERCEL_ENV=production" >> $GITHUB_ENV
+            echo "DEPLOY_ARGS=--prod" >> $GITHUB_ENV
+          else
+            echo "VERCEL_ENV=preview" >> $GITHUB_ENV
+            echo "DEPLOY_ARGS=" >> $GITHUB_ENV
+          fi
+
+      - name: Deploy to Vercel
+        id: deploy_vercel
+        run: |
+          DEPLOY_OUTPUT=$(vercel ${{ env.DEPLOY_ARGS }} --token=${{ secrets.VERCEL_TOKEN }})
+
+          DEPLOYMENT_URL=$(echo "$DEPLOY_OUTPUT" | grep -o 'https://.*\.vercel\.app' | head -1)
+          echo "DEPLOYMENT_URL=$DEPLOYMENT_URL" >> $GITHUB_ENV
+          echo "deployment_url=$DEPLOYMENT_URL" >> "$GITHUB_OUTPUT"
+
+          echo "✅ Deployment successful!"
+          echo "Environment: ${{ env.VERCEL_ENV }}"
+          echo "Deployment URL: $DEPLOYMENT_URL"
+        env:
+          VERCEL_ORG_ID: ${{ secrets.ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.PROJECT_ID }}
+          VERCEL_ENV: ${{ env.VERCEL_ENV }}
+
+      - name: Smoke test
+        run: |
+          URL="${DEPLOYMENT_URL:-}"
+          if [ -z "$URL" ]; then
+            echo "No deployment URL captured; skipping smoke test."
+            exit 0
+          fi
+          echo "Checking /health on $URL ..."
+          STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "$URL/health")
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::/health returned $STATUS (expected 200). Cold start may need more time."
+          else
+            echo "✅ /health returned 200"
+          fi
+
+      - name: Print Final URLs
+        run: |
+          echo "🎉 Deployment completed!"
+          echo "Environment: ${{ env.VERCEL_ENV }}"
+          echo "Deployment URL: ${{ env.DEPLOYMENT_URL }}"
+
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "Production: Configure your production domain in Vercel dashboard"
+          else
+            echo "Preview: ${{ env.DEPLOYMENT_URL }} (use this URL for testing)"
+          fi

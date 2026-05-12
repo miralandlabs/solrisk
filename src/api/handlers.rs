@@ -12,7 +12,7 @@ use tracing::info;
 use vercel_runtime::{Body, Response};
 
 pub const RISK_CORS_ALLOW_HEADERS: &str =
-    "Content-Type, Authorization, PAYMENT-SIGNATURE, Payment-Required, PAYMENT-RESPONSE, X-API-Version, X-Correlation-ID, X-Solrisk-Quota-Session";
+    "Content-Type, Authorization, PAYMENT-SIGNATURE, Payment-Required, PAYMENT-RESPONSE, X-API-Version, X-Correlation-ID";
 
 fn cors_headers(builder: http::response::Builder) -> http::response::Builder {
     builder
@@ -90,24 +90,23 @@ pub async fn handle_wallet_risk(
         mime_type: "application/json".to_string(),
     };
 
-    let settlement_proof =
-        match PaymentHandler::check_payment(&state, headers, resource).await {
-            Ok(proof) => proof,
-            Err(PaymentGateError::Required(payment_required)) => {
-                let payment_json =
-                    serde_json::to_string(&payment_required).unwrap_or_else(|_| "{}".to_string());
-                let payment_header =
-                    base64::engine::general_purpose::STANDARD.encode(payment_json.as_bytes());
-                return cors_headers(Response::builder().status(402))
-                    .header("Content-Type", "application/json")
-                    .header("Payment-Required", payment_header)
-                    .body(Body::Text(payment_json))
-                    .unwrap();
-            }
-            Err(PaymentGateError::RequirementsUnavailable(msg)) => {
-                return error_response(503, "PAYMENT_REQUIREMENTS_UNAVAILABLE", &msg);
-            }
-        };
+    let settlement_proof = match PaymentHandler::check_payment(&state, headers, resource).await {
+        Ok(proof) => proof,
+        Err(PaymentGateError::Required(payment_required)) => {
+            let payment_json =
+                serde_json::to_string(&payment_required).unwrap_or_else(|_| "{}".to_string());
+            let payment_header =
+                base64::engine::general_purpose::STANDARD.encode(payment_json.as_bytes());
+            return cors_headers(Response::builder().status(402))
+                .header("Content-Type", "application/json")
+                .header("Payment-Required", payment_header)
+                .body(Body::Text(payment_json))
+                .unwrap();
+        }
+        Err(PaymentGateError::RequirementsUnavailable(msg)) => {
+            return error_response(503, "PAYMENT_REQUIREMENTS_UNAVAILABLE", &msg);
+        }
+    };
 
     // Collect chain signals
     let signals = match chain::collect_chain_signals(&state.rpc_client, wallet).await {

@@ -55,8 +55,7 @@ pub async fn collect_chain_signals(
     rpc: &Arc<RpcClient>,
     wallet_str: &str,
 ) -> Result<ChainSignals, String> {
-    let pubkey = Pubkey::from_str(wallet_str)
-        .map_err(|e| format!("invalid pubkey: {}", e))?;
+    let pubkey = Pubkey::from_str(wallet_str).map_err(|e| format!("invalid pubkey: {}", e))?;
 
     let policy = RetryPolicy::from_env();
     let now_ts = Utc::now().timestamp();
@@ -82,9 +81,7 @@ pub async fn collect_chain_signals(
             let accounts = rpc
                 .get_token_accounts_by_owner(
                     &pk,
-                    solana_client::rpc_request::TokenAccountsFilter::ProgramId(
-                        spl_token::id(),
-                    ),
+                    solana_client::rpc_request::TokenAccountsFilter::ProgramId(spl_token::id()),
                 )
                 .await?;
             Ok(accounts.len() as u64)
@@ -112,7 +109,8 @@ pub async fn collect_chain_signals(
                     limit: Some(100),
                     ..Default::default()
                 };
-                rpc.get_signatures_for_address_with_config(&pk, config).await
+                rpc.get_signatures_for_address_with_config(&pk, config)
+                    .await
             }
         })
         .await;

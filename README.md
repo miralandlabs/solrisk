@@ -18,7 +18,7 @@ Returns:
 ## Pricing
 
 - **Free tier:** 1 check per identity per UTC day
-- **Paid:** $0.005 USDC per call via x402 v2 (`PAYMENT-SIGNATURE` header)
+- **Paid:** $0.05 USDC per call via x402 v2 (`PAYMENT-SIGNATURE` header)
 
 ## Architecture
 

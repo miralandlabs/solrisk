@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS solrisk_score_cache (
 --   ('MERCHANT_WALLET', '<YourSolriskSellerWallet>'),
 --   (
 --     'X402_ACCEPTS_JSON',
---     '[{"kind":"usdc","amountUi":"0.005"}]'
+--     '[{"kind":"usdc","amountUi":"0.05"}]'
 --   )
 -- ON CONFLICT (param_name) DO UPDATE SET
 --   param_value = EXCLUDED.param_value,

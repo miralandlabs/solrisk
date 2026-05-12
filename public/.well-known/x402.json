@@ -2,7 +2,7 @@
   "schemaVersion": "1",
   "x402Version": 2,
   "name": "solrisk — Solana Wallet Risk Scoring",
-  "description": "Pay-per-call wallet risk scoring. Returns 0–100 score, risk band, chain signals, and label matches. One free check per identity per UTC day; paid via x402 v2.",
+  "description": "Pay-per-call wallet risk scoring. Returns 0–100 score, risk band, chain signals, and label matches. $0.05 USDC per call via x402 v2.",
   "serviceBaseUrl": "https://solrisk.signer-payer.me",
   "paidHttpResources": [
     {

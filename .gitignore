@@ -1,0 +1,6 @@
+target/
+.env
+.vercel
+*.swp
+*.swo
+.DS_Store

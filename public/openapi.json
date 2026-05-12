@@ -1,0 +1,120 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "solrisk | Solana Wallet Risk Scoring",
+    "description": "Pay-per-call wallet risk scoring for Solana via x402 v2. Returns a 0–100 score, risk band, chain-derived signals, and label matches.",
+    "version": "0.1.0",
+    "contact": { "name": "Miraland Labs", "url": "https://miraland.io" }
+  },
+  "servers": [
+    { "url": "https://solrisk.signer-payer.me", "description": "Production (Mainnet)" },
+    { "url": "https://preview.solrisk.signer-payer.me", "description": "Preview (Devnet)" }
+  ],
+  "paths": {
+    "/api/v1/wallet-risk": {
+      "get": {
+        "summary": "Score a Solana wallet's risk",
+        "operationId": "getWalletRisk",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "query",
+            "required": true,
+            "description": "Solana wallet address (base58, 32–44 chars).",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "PAYMENT-SIGNATURE",
+            "in": "header",
+            "required": false,
+            "description": "x402 v2 settlement proof (raw JSON or base64). Required after free quota is exhausted.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "X-Solrisk-Quota-Session",
+            "in": "header",
+            "required": false,
+            "description": "Stable per-device session token for free-tier quota tracking.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Risk score result.",
+            "headers": {
+              "PAYMENT-RESPONSE": {
+                "description": "Base64 x402 settlement response when proof was included.",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/WalletRiskResponse" } }
+            }
+          },
+          "400": {
+            "description": "Invalid wallet parameter.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "402": {
+            "description": "Payment Required.",
+            "headers": {
+              "Payment-Required": { "description": "Base64 PaymentRequired JSON.", "schema": { "type": "string" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PaymentRequired" } } }
+          },
+          "501": {
+            "description": "Scoring engine not yet implemented (MVP stub).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Service health",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "WalletRiskResponse": {
+        "type": "object",
+        "properties": {
+          "wallet": { "type": "string" },
+          "risk_score": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "risk_band": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+          "checked_at": { "type": "string", "format": "date-time" },
+          "signals": { "type": "object" },
+          "flags": { "type": "array", "items": { "type": "string" } },
+          "labels": { "type": "array", "items": { "type": "object" } },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "scoring_version": { "type": "string" }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string" },
+          "message": { "type": "string" },
+          "code": { "type": "string" }
+        }
+      },
+      "PaymentRequired": {
+        "type": "object",
+        "properties": {
+          "x402Version": { "type": "integer", "const": 2 },
+          "error": { "type": "string" },
+          "resource": { "type": "object" },
+          "accepts": { "type": "array" },
+          "extensions": { "type": "object" }
+        }
+      }
+    }
+  }
+}

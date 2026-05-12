@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "1",
+  "x402Version": 2,
+  "name": "solrisk — Solana Wallet Risk Scoring",
+  "description": "Pay-per-call wallet risk scoring. Returns 0–100 score, risk band, chain signals, and label matches. One free check per identity per UTC day; paid via x402 v2.",
+  "serviceBaseUrl": "https://solrisk.signer-payer.me",
+  "paidHttpResources": [
+    {
+      "method": "GET",
+      "path": "/api/v1/wallet-risk",
+      "summary": "Score a Solana wallet's risk (0–100)"
+    }
+  ],
+  "quotaPolicy": {
+    "freePreview": "one per identity per UTC day",
+    "scope": "global_per_identity_per_utc_day"
+  },
+  "contracts": {
+    "openapiUrl": "https://solrisk.signer-payer.me/openapi.json"
+  },
+  "specification": {
+    "x402V2": "https://github.com/coinbase/x402/blob/main/specs/x402-specification-v2.md"
+  }
+}

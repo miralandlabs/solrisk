@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://solrisk.signer-payer.me/sitemap.xml

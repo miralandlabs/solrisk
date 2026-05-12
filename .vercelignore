@@ -1,0 +1,31 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+README.md
+!public/
+
+# Test files
+tests/
+**/*test*
+**/*spec*
+
+# Development files
+.env.local
+.env.development
+.env.test

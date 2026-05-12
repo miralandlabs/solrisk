@@ -1,0 +1,58 @@
+{
+    "version": 2,
+    "builds": [
+        {
+            "src": "src/bin/risk_api.rs",
+            "use": "vercel-rust@4.0.8",
+            "config": {
+                "env": {
+                    "CARGO_HOME": "/tmp/cargo",
+                    "RUSTUP_HOME": "/tmp/rustup"
+                }
+            }
+        },
+        {
+            "src": "public/**/*",
+            "use": "@vercel/static"
+        }
+    ],
+    "routes": [
+        {
+            "src": "/",
+            "dest": "/src/bin/risk_api",
+            "methods": ["GET", "HEAD", "OPTIONS"]
+        },
+        {
+            "src": "/health",
+            "dest": "/src/bin/risk_api",
+            "methods": ["GET", "HEAD", "OPTIONS"]
+        },
+        {
+            "src": "/agent-integration.md",
+            "dest": "/src/bin/risk_api",
+            "methods": ["GET", "HEAD", "OPTIONS"]
+        },
+        {
+            "src": "/.well-known/(.*)",
+            "dest": "/public/.well-known/$1"
+        },
+        {
+            "src": "/robots.txt",
+            "dest": "/public/robots.txt"
+        },
+        {
+            "src": "/sitemap.xml",
+            "dest": "/public/sitemap.xml"
+        },
+        {
+            "src": "/openapi.json",
+            "dest": "/src/bin/risk_api",
+            "methods": ["GET", "HEAD", "OPTIONS"]
+        },
+        {
+            "src": "/api/v1/wallet-risk",
+            "dest": "/src/bin/risk_api",
+            "methods": ["GET", "HEAD", "OPTIONS"]
+        }
+    ]
+}

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>solrisk | Solana Wallet Risk Scoring</title>
+    <meta name="description" content="Pay-per-call Solana wallet risk scoring via x402. Is this wallet safe to transact with? One API call, one answer.">
+    <style>
+        :root { --bg: #0a0a0f; --text: #e5e5e7; --gold: #d4af37; --dim: #888; --card: rgba(20,20,30,0.8); }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; line-height: 1.6; padding: 2rem; }
+        .container { max-width: 720px; margin: 0 auto; }
+        h1 { color: var(--gold); font-size: 2.5rem; margin-bottom: 0.5rem; }
+        .tagline { color: var(--dim); font-size: 1.1rem; margin-bottom: 2rem; }
+        .card { background: var(--card); border: 1px solid rgba(212,175,55,0.2); border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
+        .card h3 { color: var(--gold); margin-bottom: 0.5rem; }
+        code { background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+        a { color: var(--gold); }
+        .links { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 2rem; }
+        .links a { padding: 0.6rem 1.2rem; border: 1px solid var(--gold); border-radius: 6px; text-decoration: none; font-size: 0.85rem; }
+        .links a:hover { background: rgba(212,175,55,0.15); }
+        footer { margin-top: 4rem; color: var(--dim); font-size: 0.8rem; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>solrisk</h1>
+        <p class="tagline">Solana wallet risk scoring. One call, one answer, x402 micropayment.</p>
+
+        <div class="card">
+            <h3>GET /api/v1/wallet-risk?wallet=&lt;base58&gt;</h3>
+            <p>Returns a 0–100 risk score, band (LOW / MEDIUM / HIGH / CRITICAL), chain-derived signals, and label matches. $0.005 USDC per call via x402 v2. One free check per identity per UTC day.</p>
+        </div>
+
+        <div class="card">
+            <h3>Signals</h3>
+            <p>Age, activity cadence, counterparty diversity, dust-farming patterns, funding-source risk, OFAC sanctions, mixer/drainer interaction, verified-entity labels.</p>
+        </div>
+
+        <div class="card">
+            <h3>For agents</h3>
+            <p>Stable JSON schema with <code>scoring_version</code>, <code>confidence</code>, and machine-readable <code>flags[]</code>. No signup, no API key — just <code>PAYMENT-SIGNATURE</code>.</p>
+        </div>
+
+        <div class="links">
+            <a href="/openapi.json">OpenAPI</a>
+            <a href="/agent-integration.md">Agent docs</a>
+            <a href="/health">Health</a>
+            <a href="/.well-known/x402.json">x402 manifest</a>
+        </div>
+
+        <footer>
+            <p>Miraland Labs · x402 Verified Resource Provider</p>
+        </footer>
+    </div>
+</body>
+</html>

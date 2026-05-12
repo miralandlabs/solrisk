@@ -167,7 +167,10 @@ mod tests {
 
     #[test]
     fn healthy_wallet_scores_low() {
-        let result = score_wallet("SomeHealthyWallet111111111111111111111111111", &base_signals());
+        let result = score_wallet(
+            "SomeHealthyWallet111111111111111111111111111",
+            &base_signals(),
+        );
         assert!(result.risk_score <= 24, "score={}", result.risk_score);
         assert_eq!(result.risk_band, "LOW");
         assert!(result.confidence >= 0.8);

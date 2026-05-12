@@ -10,8 +10,7 @@ GET /api/v1/wallet-risk?wallet=<base58_pubkey>
 
 ## Payment
 
-- **Free tier:** 1 check per identity per UTC day (IP + `X-Solrisk-Quota-Session` header).
-- **Paid:** $0.05 USDC via x402 v2. Include `PAYMENT-SIGNATURE` header (raw JSON or base64).
+$0.05 USDC per call via x402 v2. Include `PAYMENT-SIGNATURE` header (raw JSON or base64). Every call requires payment.
 
 ## Response shape (200 OK)
 

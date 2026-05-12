@@ -1,10 +1,6 @@
 use {
     solrisk::{
-        api,
-        config::Config,
-        init::init_tracing,
-        route_handler::run_server,
-        state::AppState,
+        api, config::Config, init::init_tracing, route_handler::run_server, state::AppState,
     },
     std::{future::Future, pin::Pin, sync::Arc},
     vercel_runtime::{Body, Response, StatusCode as VercelStatusCode},
@@ -17,7 +13,7 @@ fn cors_options() -> Response<Body> {
         .header("Access-Control-Allow-Methods", "GET, OPTIONS")
         .header(
             "Access-Control-Allow-Headers",
-            "Content-Type, Authorization, PAYMENT-SIGNATURE, X-Correlation-ID, X-Solrisk-Quota-Session",
+            "Content-Type, Authorization, PAYMENT-SIGNATURE, X-Correlation-ID",
         )
         .header("Access-Control-Max-Age", "86400")
         .body(Body::Empty)

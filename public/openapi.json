@@ -26,17 +26,10 @@
           {
             "name": "PAYMENT-SIGNATURE",
             "in": "header",
-            "required": false,
-            "description": "x402 v2 settlement proof (raw JSON or base64). Required after free quota is exhausted.",
+            "required": true,
+            "description": "x402 v2 settlement proof (raw JSON or base64). Required for every call.",
             "schema": { "type": "string" }
           },
-          {
-            "name": "X-Solrisk-Quota-Session",
-            "in": "header",
-            "required": false,
-            "description": "Stable per-device session token for free-tier quota tracking.",
-            "schema": { "type": "string" }
-          }
         ],
         "responses": {
           "200": {

@@ -11,7 +11,7 @@
       "useCase": "When an agent needs a quick wallet risk signal before transacting",
       "category": "security",
       "method": "GET",
-      "resourceUrl": "https://solrisk.signer-payer.me/api/v1/wallet-risk",
+      "resourceUrl": "https://solrisk.signer-payer.me/api/v1/wallet-risk?wallet=9GzNKFnPgyZcrtiT3MVwDf9Vix8jfgSym28VGG4Motju",
       "scheme": "exact",
       "tags": [
         "risk",

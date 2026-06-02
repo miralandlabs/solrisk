@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "0.1.0",
+  "origin": "https://solrisk.signer-payer.me",
+  "merchantWallet": "9GzNKFnPgyZcrtiT3MVwDf9Vix8jfgSym28VGG4Motju",
+  "facilitatorHint": "https://ipay.sh",
+  "resources": [
+    {
+      "id": "wallet-risk",
+      "title": "Wallet risk score",
+      "description": "Risk assessment for a Solana wallet address",
+      "useCase": "When an agent needs a quick wallet risk signal before transacting",
+      "category": "security",
+      "method": "GET",
+      "resourceUrl": "https://solrisk.signer-payer.me/api/v1/wallet-risk",
+      "scheme": "exact",
+      "tags": [
+        "risk",
+        "wallet",
+        "security"
+      ]
+    }
+  ]
+}

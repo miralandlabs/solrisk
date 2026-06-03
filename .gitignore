@@ -4,5 +4,4 @@ target/
 *.swp
 *.swo
 .DS_Store
-data/
 logs/

@@ -9,11 +9,12 @@
 --   Preview/devnet:  parameters-seed-devnet.sql
 --   Mainnet:         parameters-seed-mainnet.sql
 --
--- Score-cache repair only (destructive): recreate_solrisk_score_cache.sql
+-- Score-cache repair (destructive): recreate_solrisk_score_cache.sql
+--   (v2 DDL + RLS policies + grants — do NOT run 003/004 after this)
 --
--- Upgrading an existing v0.1 database (legacy parameters, wallet-only cache PK)?
--- Run 002_parameters_v2.sql, then 003_score_cache_pk.sql, then
--- 004_score_cache_drop_wallet_pubkey.sql — do NOT re-run this file.
+-- Legacy v0.1 upgrade only (keep existing cache table, do NOT drop/recreate)?
+--   002_parameters_v2.sql → 003_score_cache_pk.sql → 004_score_cache_drop_wallet_pubkey.sql
+--   → 005_score_cache_rls.sql
 
 -- ============================================================================
 -- parameters (v2 — multi-tenant, per-endpoint pricing)
@@ -118,6 +119,32 @@ CREATE TABLE IF NOT EXISTS solrisk_score_cache (
 
 CREATE INDEX IF NOT EXISTS idx_solrisk_score_cache_expires
     ON solrisk_score_cache (expires_at);
+
+ALTER TABLE solrisk_score_cache ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS solrisk_score_cache_service_role_all ON solrisk_score_cache;
+DROP POLICY IF EXISTS solrisk_score_cache_postgres_all ON solrisk_score_cache;
+DROP POLICY IF EXISTS solrisk_score_cache_backend ON solrisk_score_cache;
+
+CREATE POLICY solrisk_score_cache_backend
+    ON solrisk_score_cache
+    FOR ALL
+    USING (current_user NOT IN ('anon', 'authenticated'))
+    WITH CHECK (current_user NOT IN ('anon', 'authenticated'));
+
+CREATE POLICY solrisk_score_cache_service_role_all
+    ON solrisk_score_cache
+    FOR ALL
+    TO service_role
+    USING (true)
+    WITH CHECK (true);
+
+CREATE POLICY solrisk_score_cache_postgres_all
+    ON solrisk_score_cache
+    FOR ALL
+    TO postgres
+    USING (true)
+    WITH CHECK (true);
 
 -- ============================================================================
 -- solrisk_subscriptions — issued JWTs (revocation by payer + issued_at)

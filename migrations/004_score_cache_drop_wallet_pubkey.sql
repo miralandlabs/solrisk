@@ -1,3 +1,4 @@
+-- Legacy v0.1 upgrade ONLY — skip if you ran recreate_solrisk_score_cache.sql.
 -- Legacy v0.1 score_cache kept wallet_pubkey NOT NULL; v2 INSERTs only set
 -- (endpoint, subject). Drops the orphan column so cache writes succeed.
 -- Safe on fresh init.sql installs (column never existed).

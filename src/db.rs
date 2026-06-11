@@ -33,7 +33,6 @@ impl ParametersDb {
     const TX_BEGIN_TIMEOUT: Duration = Duration::from_secs(20);
     const SET_LOCAL_CMD_TIMEOUT: Duration = Duration::from_secs(5);
     const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
-    const DEALLOCATE_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// Per-statement ceiling enforced by Postgres (below [`Self::QUERY_TIMEOUT`]).
     const PG_STATEMENT_TIMEOUT: &'static str = "25s";
@@ -436,7 +435,6 @@ impl ParametersDb {
     ) -> Result<deadpool_postgres::Transaction<'a>, Error> {
         let tx = Self::begin_transaction(client, label).await?;
         Self::set_statement_timeout_local(&tx).await;
-        Self::deallocate_prepared(&tx).await;
         Ok(tx)
     }
 
@@ -471,9 +469,7 @@ impl ParametersDb {
         }
     }
 
-    async fn deallocate_prepared(tx: &deadpool_postgres::Transaction<'_>) {
-        let _ = timeout(Self::DEALLOCATE_TIMEOUT, tx.execute("DEALLOCATE ALL", &[])).await;
-    }
+
 
     async fn commit_transaction(
         tx: deadpool_postgres::Transaction<'_>,

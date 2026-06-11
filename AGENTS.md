@@ -7,6 +7,8 @@ the task; do not refactor, abstract, or add features that were not asked for.
 `solrisk` v2 is the **canonical open-source x402 seller** on the `exact` rail:
 per-call payment **and** subscription JWT on the same data routes (dual auth).
 
+**Production (v0.2.1):** `wallet-risk` + subscription are buyer-trustworthy (labels, v1.1.1 scoring, `recommendation` envelope). `token-risk` is beta. `tx-risk` returns **501** — reserved route, **not** a paid SKU; do not list it under paid per-call routes.
+
 ## Topology
 
 Single Rust crate (`solrisk`), bin **`risk_api`**, deployed on Vercel (`vercel.json`).
@@ -15,11 +17,16 @@ pricing, subscriptions, labels, cache, audit log, and rate limits.
 
 ### Paid per-call routes (x402 `PAYMENT-SIGNATURE` or Bearer JWT)
 
-| Endpoint key | Route |
-|--------------|-------|
-| `wallet-risk` | `GET /api/v1/wallet-risk?wallet=` |
-| `token-risk` | `GET /api/v1/token-risk?mint=` |
-| `tx-risk` | `GET /api/v1/tx-risk?signature=` |
+| Endpoint key | Route | Status |
+|--------------|-------|--------|
+| `wallet-risk` | `GET /api/v1/wallet-risk?wallet=` | Production |
+| `token-risk` | `GET /api/v1/token-risk?mint=` | Beta |
+
+### Reserved (not billed)
+
+| Route | Behavior |
+|-------|----------|
+| `GET /api/v1/tx-risk?signature=` | **501** before auth — P1 `getParsedTransaction`; keep route for URL stability |
 
 ### Subscription routes (x402 gate only here)
 

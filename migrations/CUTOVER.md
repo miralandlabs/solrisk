@@ -13,8 +13,9 @@ solrisk v2 aligns to the same shape. **Never delete or overwrite rows where `ser
 2. Seed pricing:
    - Preview/devnet: `migrations/parameters-seed-devnet.sql`
    - Mainnet: `migrations/parameters-seed-mainnet.sql`
-3. Set `JWT_SECRET` in Vercel (`openssl rand -hex 32`).
-4. Set `DATABASE_URL` in Vercel and redeploy.
+3. Seed labels: `migrations/labels-seed.sql` (or `python3 scripts/build_label_seeds.py`).
+4. Set `JWT_SECRET` in Vercel (`openssl rand -hex 32`).
+5. Set `DATABASE_URL` in Vercel and redeploy.
 
 Skip `002_parameters_v2.sql` on a fresh database — it is only for upgrading legacy v0.1 installs.
 
@@ -24,8 +25,9 @@ Skip `002_parameters_v2.sql` on a fresh database — it is only for upgrading le
 2. Seed pricing:
    - Preview/devnet: `migrations/parameters-seed-devnet.sql`
    - Mainnet: `migrations/parameters-seed-mainnet.sql`
+3. Seed labels: `migrations/labels-seed.sql`.
 4. Set `JWT_SECRET` in Vercel (openssl rand -hex 32).
-5. Deploy preview; verify `GET /api/v1/subscribe/info` and per-endpoint 402 amounts.
+5. Deploy preview; verify `GET /api/v1/subscribe/info`, `label_coverage`, and per-endpoint 402 amounts.
 
 ## Legacy compatibility
 

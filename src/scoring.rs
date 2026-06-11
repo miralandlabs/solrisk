@@ -4,7 +4,7 @@ use crate::signals::chain::ChainSignals;
 use crate::signals::labels::{allow_index, deny_index};
 use serde::Serialize;
 
-pub const SCORING_VERSION: &str = "1.1.0";
+pub const SCORING_VERSION: &str = "1.1.1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RiskResult {
@@ -23,6 +23,17 @@ pub struct LabelMatch {
     pub source: String,
     pub label: String,
     pub weight: i32,
+}
+
+/// Machine-readable action for agents: BLOCK on deny labels or CRITICAL band.
+pub fn recommendation_from(band: &str, has_deny_label: bool, signal_quality: &str) -> &'static str {
+    if has_deny_label || band == "CRITICAL" {
+        "BLOCK"
+    } else if band == "HIGH" || band == "MEDIUM" || signal_quality == "low" {
+        "REVIEW"
+    } else {
+        "ALLOW"
+    }
 }
 
 pub fn score_wallet(wallet: &str, signals: &ChainSignals) -> RiskResult {
@@ -67,7 +78,10 @@ pub fn score_wallet(wallet: &str, signals: &ChainSignals) -> RiskResult {
         score -= age_bonus;
     }
 
-    if signals.tx_count_30d >= 10 && signals.unique_counterparties_30d >= 5 {
+    if !signals.counterparty_metrics_estimated
+        && signals.tx_count_30d >= 10
+        && signals.unique_counterparties_30d >= 5
+    {
         score -= 10;
     }
 
@@ -176,7 +190,26 @@ mod tests {
         );
         assert!(result.risk_score <= 24, "score={}", result.risk_score);
         assert_eq!(result.risk_band, "LOW");
-        assert_eq!(result.scoring_version, "1.1.0");
+        assert_eq!(result.scoring_version, "1.1.1");
+    }
+
+    #[test]
+    fn activity_bonus_skipped_when_counterparties_estimated() {
+        let mut signals = base_signals();
+        signals.is_fresh_funded = true;
+        signals.funding_source_risk = "fresh_unknown".to_string();
+        assert!(signals.counterparty_metrics_estimated);
+        let wallet = "SomeHealthyWallet111111111111111111111111111";
+        let estimated = score_wallet(wallet, &signals);
+        let mut with_real = signals.clone();
+        with_real.counterparty_metrics_estimated = false;
+        let real = score_wallet(wallet, &with_real);
+        assert!(
+            real.risk_score < estimated.risk_score,
+            "estimated={} real={}",
+            estimated.risk_score,
+            real.risk_score
+        );
     }
 
     #[test]
@@ -200,6 +233,33 @@ mod tests {
         );
         assert!(result.risk_score >= 75, "score={}", result.risk_score);
         assert_eq!(result.risk_band, "CRITICAL");
+    }
+
+    #[test]
+    fn sanctioned_wallet_recommendation_block() {
+        let result = score_wallet(
+            "WSSoJFMBEKBbAMwRqnMfjt1urtsFGBTMqjsqbBpVMpC",
+            &base_signals(),
+        );
+        let has_deny = result.labels.iter().any(|l| l.weight > 0);
+        assert!(has_deny);
+        assert_eq!(
+            recommendation_from(result.risk_band, has_deny, result.signal_quality),
+            "BLOCK"
+        );
+    }
+
+    #[test]
+    fn clean_wallet_recommendation_allow() {
+        let result = score_wallet(
+            "SomeHealthyWallet111111111111111111111111111",
+            &base_signals(),
+        );
+        let has_deny = result.labels.iter().any(|l| l.weight > 0);
+        assert_eq!(
+            recommendation_from(result.risk_band, has_deny, result.signal_quality),
+            "ALLOW"
+        );
     }
 
     #[test]

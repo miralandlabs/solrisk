@@ -6,10 +6,9 @@ use crate::api::common::{
 };
 use crate::auth::dual::{authenticate_data_route, DataAuth};
 use crate::constants::API_VERSION;
-use crate::pricing::{self, ENDPOINT_TOKEN_RISK, ENDPOINT_TX_RISK, ENDPOINT_WALLET_RISK};
+use crate::pricing::{self, ENDPOINT_TOKEN_RISK, ENDPOINT_WALLET_RISK};
 use crate::scoring;
 use crate::scoring_token;
-use crate::scoring_tx;
 use crate::signals::chain;
 use crate::signals::labels;
 use crate::signals::token;
@@ -29,14 +28,18 @@ pub async fn handle_health(state: Arc<AppState>) -> Response<Body> {
     } else {
         false
     };
+    labels::refresh_labels_from_db(state.db.as_deref()).await;
+    let coverage = labels::label_coverage();
     let body = serde_json::json!({
         "status": "ok",
         "service": "solrisk",
         "version": env!("CARGO_PKG_VERSION"),
         "api_version": API_VERSION,
         "db_connected": db_ok,
+        "cluster": state.config.cluster_label(),
         "wallet_scoring_version": scoring::SCORING_VERSION,
         "token_scoring_version": scoring_token::SCORING_VERSION,
+        "label_coverage": coverage,
     });
     crate::api::common::cors_headers(Response::builder().status(200))
         .header("Content-Type", "application/json")
@@ -49,9 +52,40 @@ async fn maybe_cached(
     state: &AppState,
     endpoint: &str,
     subject: &str,
-) -> Option<serde_json::Value> {
+) -> Option<(serde_json::Value, chrono::DateTime<chrono::Utc>)> {
     let db = state.db.as_deref()?;
     db.get_cached_score(endpoint, subject).await.ok().flatten()
+}
+
+fn enrich_cached(
+    mut body: serde_json::Value,
+    cached_at: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("cache_hit".to_string(), serde_json::Value::Bool(true));
+        obj.insert(
+            "cached_at".to_string(),
+            serde_json::Value::String(cached_at.to_rfc3339()),
+        );
+    }
+    body
+}
+
+fn envelope_fields(
+    cluster: &str,
+    recommendation: &str,
+    cache_hit: bool,
+    cached_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "cluster": cluster,
+        "recommendation": recommendation,
+        "cache_hit": cache_hit,
+    });
+    if let Some(t) = cached_at {
+        v["cached_at"] = serde_json::Value::String(t.to_rfc3339());
+    }
+    v
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -100,8 +134,9 @@ pub async fn handle_wallet_risk(
         );
     }
 
-    if let Some(cached) = maybe_cached(&state, ENDPOINT_WALLET_RISK, wallet).await {
-        return ok_with_payment(cached, None);
+    let cluster = state.config.cluster_label();
+    if let Some((cached, cached_at)) = maybe_cached(&state, ENDPOINT_WALLET_RISK, wallet).await {
+        return ok_with_payment(enrich_cached(cached, cached_at), None);
     }
 
     let resource = ResourceInfo {
@@ -133,8 +168,11 @@ pub async fn handle_wallet_risk(
     };
 
     let result = scoring::score_wallet(wallet, &signals);
+    let has_deny = !result.labels.is_empty() && result.labels.iter().any(|l| l.weight > 0);
+    let recommendation =
+        scoring::recommendation_from(result.risk_band, has_deny, result.signal_quality);
     let checked_at = Utc::now().to_rfc3339();
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "api_version": API_VERSION,
         "wallet": wallet,
         "risk_score": result.risk_score,
@@ -147,6 +185,14 @@ pub async fn handle_wallet_risk(
         "signal_quality": result.signal_quality,
         "scoring_version": result.scoring_version,
     });
+    if let Some(obj) = body.as_object_mut() {
+        for (k, v) in envelope_fields(cluster, recommendation, false, None)
+            .as_object()
+            .unwrap()
+        {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
 
     write_cache_and_log(
         &state,
@@ -161,7 +207,7 @@ pub async fn handle_wallet_risk(
     )
     .await;
 
-    info!(wallet = %wallet, score = result.risk_score, band = result.risk_band, "wallet-risk scored");
+    info!(wallet = %wallet, score = result.risk_score, band = result.risk_band, recommendation, "wallet-risk scored");
     ok_with_payment(body, settlement_from_auth(&auth))
 }
 
@@ -179,8 +225,9 @@ pub async fn handle_token_risk(
         );
     }
 
-    if let Some(cached) = maybe_cached(&state, ENDPOINT_TOKEN_RISK, mint).await {
-        return ok_with_payment(cached, None);
+    let cluster = state.config.cluster_label();
+    if let Some((cached, cached_at)) = maybe_cached(&state, ENDPOINT_TOKEN_RISK, mint).await {
+        return ok_with_payment(enrich_cached(cached, cached_at), None);
     }
 
     let resource = ResourceInfo {
@@ -208,7 +255,9 @@ pub async fn handle_token_risk(
     };
 
     let result = scoring_token::score_token(mint, &signals);
-    let body = serde_json::json!({
+    let recommendation =
+        scoring::recommendation_from(result.risk_band, false, result.signal_quality);
+    let mut body = serde_json::json!({
         "api_version": API_VERSION,
         "mint": mint,
         "risk_domain": result.risk_domain,
@@ -221,6 +270,14 @@ pub async fn handle_token_risk(
         "signal_quality": result.signal_quality,
         "scoring_version": result.scoring_version,
     });
+    if let Some(obj) = body.as_object_mut() {
+        for (k, v) in envelope_fields(cluster, recommendation, false, None)
+            .as_object()
+            .unwrap()
+        {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
 
     write_cache_and_log(
         &state,
@@ -239,9 +296,9 @@ pub async fn handle_token_risk(
 }
 
 pub async fn handle_tx_risk(
-    headers: &HeaderMap,
+    _headers: &HeaderMap,
     query: &str,
-    state: Arc<AppState>,
+    _state: Arc<AppState>,
 ) -> Response<Body> {
     let signature = extract_query_param(query, "signature");
     if signature.is_empty() || signature.len() < 80 {
@@ -252,50 +309,9 @@ pub async fn handle_tx_risk(
         );
     }
 
-    if let Some(cached) = maybe_cached(&state, ENDPOINT_TX_RISK, signature).await {
-        return ok_with_payment(cached, None);
-    }
-
-    let resource = ResourceInfo {
-        url: state
-            .config
-            .x402_resource_url_for_request(headers, "/api/v1/tx-risk", query),
-        description: pricing::resource_description(ENDPOINT_TX_RISK).to_string(),
-        mime_type: "application/json".to_string(),
-    };
-
-    let auth = match authenticate_data_route(&state, headers, ENDPOINT_TX_RISK, resource).await {
-        Ok(a) => a,
-        Err(e) => return handle_auth_error(e),
-    };
-
-    let result = scoring_tx::score_tx(signature);
-    let body = serde_json::json!({
-        "api_version": API_VERSION,
-        "signature": signature,
-        "risk_domain": result.risk_domain,
-        "risk_score": result.risk_score,
-        "risk_band": result.risk_band,
-        "checked_at": Utc::now().to_rfc3339(),
-        "signals": result.signals,
-        "flags": result.flags,
-        "confidence": result.confidence,
-        "signal_quality": result.signal_quality,
-        "scoring_version": result.scoring_version,
-    });
-
-    write_cache_and_log(
-        &state,
-        ENDPOINT_TX_RISK,
-        signature,
-        &body,
-        result.risk_score as i32,
-        result.risk_band,
-        result.scoring_version,
-        &auth,
-        None,
+    error_response(
+        501,
+        "NOT_IMPLEMENTED",
+        "tx-risk is not available yet (planned v2.1 with getParsedTransaction). No payment required.",
     )
-    .await;
-
-    ok_with_payment(body, settlement_from_auth(&auth))
 }

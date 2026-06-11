@@ -2,8 +2,8 @@
   "openapi": "3.0.0",
   "info": {
     "title": "solrisk | Solana Risk Scoring",
-    "description": "Dual-mode x402 seller: per-call PAYMENT-SIGNATURE or subscription Bearer JWT on data routes. Wallet, token, and transaction risk scores.",
-    "version": "0.2.0",
+    "description": "Production-ready dual-mode x402 seller: wallet screening (v1.1.1) and subscription JWT on the exact rail. Token-risk is beta. tx-risk is reserved (501, not billed).",
+    "version": "0.2.1",
     "contact": { "name": "Miraland Labs", "url": "https://miraland.io" }
   },
   "servers": [
@@ -45,16 +45,13 @@
     },
     "/api/v1/tx-risk": {
       "get": {
-        "summary": "Score a transaction signature risk",
+        "summary": "Transaction risk (planned v2.1 — not billed)",
         "operationId": "getTxRisk",
         "parameters": [
-          { "name": "signature", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "name": "Authorization", "in": "header", "required": false, "schema": { "type": "string" } },
-          { "name": "PAYMENT-SIGNATURE", "in": "header", "required": false, "schema": { "type": "string" } }
+          { "name": "signature", "in": "query", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
-          "200": { "description": "Tx risk score", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TxRiskResponse" } } } },
-          "402": { "description": "Payment required", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PaymentRequired" } } } }
+          "501": { "description": "Not implemented", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
         }
       }
     },
@@ -98,7 +95,11 @@
           "risk_score": { "type": "integer" },
           "risk_band": { "type": "string" },
           "signal_quality": { "type": "string", "enum": ["high", "medium", "low"] },
-          "scoring_version": { "type": "string", "example": "1.1.0" }
+          "recommendation": { "type": "string", "enum": ["ALLOW", "REVIEW", "BLOCK"] },
+          "cluster": { "type": "string", "enum": ["mainnet", "devnet"] },
+          "cache_hit": { "type": "boolean" },
+          "cached_at": { "type": "string", "format": "date-time" },
+          "scoring_version": { "type": "string", "example": "1.1.1" }
         }
       },
       "TokenRiskResponse": {
@@ -108,6 +109,10 @@
           "mint": { "type": "string" },
           "risk_domain": { "type": "string", "const": "token" },
           "risk_score": { "type": "integer" },
+          "recommendation": { "type": "string", "enum": ["ALLOW", "REVIEW", "BLOCK"] },
+          "cluster": { "type": "string", "enum": ["mainnet", "devnet"] },
+          "cache_hit": { "type": "boolean" },
+          "cached_at": { "type": "string", "format": "date-time" },
           "scoring_version": { "type": "string", "example": "1.0.0" }
         }
       },

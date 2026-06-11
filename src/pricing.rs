@@ -10,8 +10,8 @@ pub const TIER_MONTHLY: &str = "monthly";
 
 pub const ALL_TIERS: &[&str] = &[TIER_HOURLY, TIER_DAILY, TIER_MONTHLY];
 
-pub const PER_CALL_ENDPOINTS: &[&str] =
-    &[ENDPOINT_WALLET_RISK, ENDPOINT_TOKEN_RISK, ENDPOINT_TX_RISK];
+/// Paid data routes (tx-risk gated 501 until v2.1).
+pub const PER_CALL_ENDPOINTS: &[&str] = &[ENDPOINT_WALLET_RISK, ENDPOINT_TOKEN_RISK];
 
 /// Parameters table endpoint key for subscribe tiers (matches subscription-starter).
 pub fn subscribe_endpoint_key(tier: &str) -> String {

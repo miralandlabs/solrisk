@@ -137,3 +137,32 @@ pub fn allow_index() -> LabelIndex {
         })
         .unwrap_or_else(|_| static_allow_index())
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LabelCoverage {
+    pub deny_count: usize,
+    pub allow_count: usize,
+    pub sources: Vec<String>,
+    pub last_refresh_hint: &'static str,
+}
+
+pub fn label_coverage() -> LabelCoverage {
+    let deny = deny_index();
+    let allow = allow_index();
+    let mut sources: Vec<String> = deny
+        .by_wallet
+        .values()
+        .flatten()
+        .chain(allow.by_wallet.values().flatten())
+        .map(|e| e.source.clone())
+        .collect();
+    sources.sort();
+    sources.dedup();
+    LabelCoverage {
+        deny_count: deny.by_wallet.len(),
+        allow_count: allow.by_wallet.len(),
+        sources,
+        last_refresh_hint:
+            "JSONL compile-time fallback; DB overrides when DATABASE_URL set (TTL 300s)",
+    }
+}

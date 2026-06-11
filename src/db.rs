@@ -278,13 +278,13 @@ impl ParametersDb {
         &self,
         endpoint: &str,
         subject: &str,
-    ) -> Result<Option<serde_json::Value>, Error> {
+    ) -> Result<Option<(serde_json::Value, chrono::DateTime<chrono::Utc>)>, Error> {
         let client = self.conn().await?;
         let row = timeout(
             Self::QUERY_TIMEOUT,
             client.query_opt(
                 r#"
-                SELECT response_json FROM solrisk_score_cache
+                SELECT response_json, cached_at FROM solrisk_score_cache
                 WHERE endpoint = $1 AND subject = $2 AND expires_at > NOW()
                 "#,
                 &[&endpoint, &subject],
@@ -294,7 +294,11 @@ impl ParametersDb {
         .map_err(|_| Error::Internal("cache read timed out".into()))?
         .map_err(|e| Error::Internal(e.to_string()))?;
 
-        Ok(row.map(|r| r.get::<_, serde_json::Value>("response_json")))
+        Ok(row.map(|r| {
+            let json: serde_json::Value = r.get("response_json");
+            let cached_at: chrono::DateTime<chrono::Utc> = r.get("cached_at");
+            (json, cached_at)
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]

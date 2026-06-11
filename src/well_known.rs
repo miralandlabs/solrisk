@@ -1,10 +1,7 @@
 //! Dynamic x402 resource manifest (SRM).
 
 use crate::constants::API_VERSION;
-use crate::pricing::{
-    self, subscribe_endpoint_key, ALL_TIERS, ENDPOINT_TOKEN_RISK, ENDPOINT_TX_RISK,
-    ENDPOINT_WALLET_RISK, PER_CALL_ENDPOINTS,
-};
+use crate::pricing::{self, subscribe_endpoint_key, ALL_TIERS, PER_CALL_ENDPOINTS};
 use crate::state::AppState;
 use serde_json::json;
 
@@ -39,7 +36,7 @@ pub async fn build_x402_resources(state: &AppState, base_url: &str) -> serde_jso
         "apiVersion": API_VERSION,
         "service": "solrisk",
         "resources": resources,
-        "dataEndpoints": [ENDPOINT_WALLET_RISK, ENDPOINT_TOKEN_RISK, ENDPOINT_TX_RISK],
+        "dataEndpoints": PER_CALL_ENDPOINTS,
         "facilitatorUrl": state.config.x402_facilitator_url,
     })
 }

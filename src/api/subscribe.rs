@@ -4,6 +4,7 @@ use crate::api::common::{
     error_response, extract_tier_from_query, ok_with_payment, subscribe_402_response,
 };
 use crate::pricing::{self, subscribe_endpoint_key, ALL_TIERS, PER_CALL_ENDPOINTS};
+use crate::signals::labels;
 use crate::state::AppState;
 use crate::subscription::{
     self, is_valid_tier, tier_duration_secs, tier_label, JWT_PERSISTENCE_HINT,
@@ -35,13 +36,18 @@ pub async fn handle_subscribe_info(state: Arc<AppState>) -> Response<Body> {
         .filter_map(|e| pricing::path_for_endpoint(e))
         .collect();
 
+    labels::refresh_labels_from_db(state.db.as_deref()).await;
+    let coverage = labels::label_coverage();
+
     crate::api::common::json_response(
         200,
         serde_json::json!({
             "service": "solrisk",
             "api_version": crate::constants::API_VERSION,
+            "cluster": state.config.cluster_label(),
             "tiers": tiers,
             "dataRoutes": data_routes,
+            "label_coverage": coverage,
             "persistenceHint": JWT_PERSISTENCE_HINT,
             "auth": "Authorization: Bearer <token> on data routes",
             "facilitatorUrl": state.config.x402_facilitator_url,

@@ -1,8 +1,8 @@
 //! Risk scoring API handlers (wallet, token, tx).
 
 use crate::api::common::{
-    error_response, extract_query_param, handle_auth_error, ok_with_payment, payer_from_auth,
-    settlement_from_auth, settlement_sig_from_auth,
+    error_response, error_response_with_settlement, extract_query_param, handle_auth_error,
+    ok_with_payment, payer_from_auth, settlement_from_auth, settlement_sig_from_auth,
 };
 use crate::auth::dual::{authenticate_data_route, DataAuth};
 use crate::constants::API_VERSION;
@@ -135,10 +135,6 @@ pub async fn handle_wallet_risk(
     }
 
     let cluster = state.config.cluster_label();
-    if let Some((cached, cached_at)) = maybe_cached(&state, ENDPOINT_WALLET_RISK, wallet).await {
-        return ok_with_payment(enrich_cached(cached, cached_at), None);
-    }
-
     let resource = ResourceInfo {
         url: state
             .config
@@ -153,16 +149,28 @@ pub async fn handle_wallet_risk(
         Err(e) => return handle_auth_error(e),
     };
 
+    // Cache lookup only after auth: cached scores are part of the paid product
+    // (disclosed via `cache_hit` / `cached_at`), not a free tier.
+    if let Some((cached, cached_at)) = maybe_cached(&state, ENDPOINT_WALLET_RISK, wallet).await {
+        return ok_with_payment(
+            enrich_cached(cached, cached_at),
+            settlement_from_auth(&auth),
+        );
+    }
+
     labels::refresh_labels_from_db(state.db.as_deref()).await;
 
     let signals = match chain::collect_chain_signals(&state.rpc_client, wallet).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(wallet = %wallet, error = %e, "chain signal collection failed");
-            return error_response(
+            // Payment settles before RPC work (Solana blockhash expiry — see rpc_retry.rs),
+            // so include the settlement proof for buyer-side reconciliation.
+            return error_response_with_settlement(
                 503,
                 "RPC_ERROR",
                 &format!("Could not collect on-chain data for {wallet}: {e}"),
+                &auth,
             );
         }
     };
@@ -226,10 +234,6 @@ pub async fn handle_token_risk(
     }
 
     let cluster = state.config.cluster_label();
-    if let Some((cached, cached_at)) = maybe_cached(&state, ENDPOINT_TOKEN_RISK, mint).await {
-        return ok_with_payment(enrich_cached(cached, cached_at), None);
-    }
-
     let resource = ResourceInfo {
         url: state
             .config
@@ -243,13 +247,23 @@ pub async fn handle_token_risk(
         Err(e) => return handle_auth_error(e),
     };
 
+    // Cache lookup only after auth (see wallet-risk handler).
+    if let Some((cached, cached_at)) = maybe_cached(&state, ENDPOINT_TOKEN_RISK, mint).await {
+        return ok_with_payment(
+            enrich_cached(cached, cached_at),
+            settlement_from_auth(&auth),
+        );
+    }
+
     let signals = match token::collect_token_signals(&state.rpc_client, mint).await {
         Ok(s) => s,
         Err(e) => {
-            return error_response(
+            tracing::warn!(mint = %mint, error = %e, "token signal collection failed");
+            return error_response_with_settlement(
                 503,
                 "RPC_ERROR",
                 &format!("Token signal collection failed: {e}"),
+                &auth,
             );
         }
     };

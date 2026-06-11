@@ -46,7 +46,7 @@ Without either → HTTP **402** with per-endpoint `accepts[]` and `extensions.su
 ```json
 {
   "api_version": 2,
-  "scoring_version": "1.1.1",
+  "scoring_version": "1.2.0",
   "recommendation": "ALLOW",
   "signal_quality": "medium",
   "cluster": "mainnet",
@@ -62,7 +62,7 @@ Without either → HTTP **402** with per-endpoint `accepts[]` and `extensions.su
 | `cached_at` | ISO8601 | Present when `cache_hit` is true |
 | `cluster` | `mainnet`, `devnet` | From seller `X402_NETWORK` |
 
-Wallet `scoring_version` **1.1.1** — activity bonus no longer uses estimated counterparty metrics.
+Wallet `scoring_version` **1.2.0** — unmeasured signals are honest: `signals.unique_counterparties_30d` and `signals.program_diversity_30d` are `null` until derived from parsed transactions (`counterparty_metrics_estimated` tells you which). They are never synthesized from tx counts.
 
 ## Label coverage (free)
 
@@ -77,6 +77,7 @@ Wallet `scoring_version` **1.1.1** — activity bonus no longer uses estimated c
 | `SUBSCRIBER_RATE_LIMIT_EXCEEDED` | 429 | Per-payer fair use |
 | `RATE_LIMIT_EXCEEDED` | 429 | Global per-IP limit |
 | `NOT_IMPLEMENTED` | 501 | tx-risk reserved — ignore in production integrations |
+| `RPC_ERROR` | 503 | Chain data unavailable after retries. Payment settles **before** RPC work (Solana blockhash expiry), so if you paid per-call the 503 includes `settlement_sig` and the `PAYMENT-RESPONSE` header — keep them to reconcile "paid, not served" |
 
 ## tx-risk
 
@@ -85,4 +86,4 @@ Do not call `/api/v1/tx-risk` in production agents. The route exists as a reserv
 ## Discovery
 
 - `GET /.well-known/x402-resources.json` — payable resources (wallet, token, subscribe tiers)
-- `GET /openapi.json` — OpenAPI 0.2.1
+- `GET /openapi.json` — OpenAPI 0.2.2

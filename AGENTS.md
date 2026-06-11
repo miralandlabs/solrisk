@@ -7,7 +7,14 @@ the task; do not refactor, abstract, or add features that were not asked for.
 `solrisk` v2 is the **canonical open-source x402 seller** on the `exact` rail:
 per-call payment **and** subscription JWT on the same data routes (dual auth).
 
-**Production (v0.2.1):** `wallet-risk` + subscription are buyer-trustworthy (labels, v1.1.1 scoring, `recommendation` envelope). `token-risk` is beta. `tx-risk` returns **501** — reserved route, **not** a paid SKU; do not list it under paid per-call routes.
+**Production (v0.2.2):** `wallet-risk` + subscription are buyer-trustworthy (labels, v1.2.0 scoring, `recommendation` envelope). `token-risk` is beta. `tx-risk` returns **501** — reserved route, **not** a paid SKU; do not list it under paid per-call routes.
+
+Settlement-ordering invariants (do not regress):
+
+- **Settle before work** on per-call x402 (Solana blockhash expiry — see `rpc_retry.rs`). Never reorder to verify→serve→settle.
+- **Post-settlement failures carry the settlement proof:** 503 from signal collection must include `PAYMENT-RESPONSE` + `settlement_sig` (`error_response_with_settlement`).
+- **Cache is served only after auth** — cached scores are paid responses (`cache_hit: true`), not a free tier.
+- **Unmeasured signals are `null`, never synthesized** (counterparty/program metrics until parsed-tx support lands).
 
 ## Topology
 

@@ -41,6 +41,38 @@ pub fn error_response(status: u16, code: &str, message: &str) -> Response<Body> 
     )
 }
 
+/// Error response for failures that occur **after** payment settlement
+/// (settle-before-work is deliberate on Solana — see `rpc_retry.rs`).
+/// Attaches the settlement proof (`PAYMENT-RESPONSE` header + `settlement_sig`
+/// body field) so the buyer can reconcile "paid, not served".
+pub fn error_response_with_settlement(
+    status: u16,
+    code: &str,
+    message: &str,
+    auth: &DataAuth,
+) -> Response<Body> {
+    let mut body = serde_json::json!({
+        "error": code,
+        "message": message,
+        "code": code,
+        "api_version": API_VERSION,
+    });
+    if let Some(sig) = settlement_sig_from_auth(auth).filter(|s| !s.is_empty()) {
+        body["settlement_sig"] = Value::String(sig);
+    }
+
+    let mut builder = cors_headers(Response::builder().status(status))
+        .header("Content-Type", "application/json")
+        .header("X-API-Version", API_VERSION.to_string());
+    if let Some(proof) = settlement_from_auth(auth) {
+        let hdr = proof.header_value();
+        if !hdr.is_empty() {
+            builder = builder.header("PAYMENT-RESPONSE", hdr);
+        }
+    }
+    builder.body(Body::Text(body.to_string())).unwrap()
+}
+
 pub fn payment_402_response(
     payment_required: &crate::x402::models::PaymentRequired,
 ) -> Response<Body> {

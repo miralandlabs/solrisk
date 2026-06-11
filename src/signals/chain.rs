@@ -14,11 +14,14 @@ pub struct ChainSignals {
     pub age_days: u64,
     pub tx_count_total: u64,
     pub tx_count_30d: u64,
-    pub unique_counterparties_30d: u64,
+    /// `null` unless derived from parsed transactions
+    /// (`counterparty_metrics_estimated == false`). Never synthesized.
+    pub unique_counterparties_30d: Option<u64>,
     pub sol_balance_lamports: u64,
     pub spl_account_count: u64,
     pub has_activity_48h: bool,
-    pub program_diversity_30d: u64,
+    /// `null` unless derived from parsed transactions. Never synthesized.
+    pub program_diversity_30d: Option<u64>,
     pub is_fresh_funded: bool,
     pub funding_source_risk: String,
     pub first_seen_ts: i64,
@@ -34,11 +37,11 @@ impl Default for ChainSignals {
             age_days: 0,
             tx_count_total: 0,
             tx_count_30d: 0,
-            unique_counterparties_30d: 0,
+            unique_counterparties_30d: None,
             sol_balance_lamports: 0,
             spl_account_count: 0,
             has_activity_48h: false,
-            program_diversity_30d: 0,
+            program_diversity_30d: None,
             is_fresh_funded: false,
             funding_source_risk: "not_checked".to_string(),
             first_seen_ts: 0,
@@ -110,6 +113,7 @@ pub async fn collect_chain_signals(
     let mut all_sigs = Vec::new();
     let mut before: Option<solana_sdk::signature::Signature> = None;
     let max_pages = max_sig_pages();
+    let mut pages_fetched: u32 = 0;
 
     for page in 0..max_pages {
         let rpc_sig = Arc::clone(rpc);
@@ -132,6 +136,7 @@ pub async fn collect_chain_signals(
 
         match sigs_result {
             Ok(sigs) => {
+                pages_fetched += 1;
                 let is_last = sigs.len() < 100;
                 if let Some(last) = sigs.last() {
                     before = solana_sdk::signature::Signature::from_str(&last.signature).ok();
@@ -180,24 +185,24 @@ pub async fn collect_chain_signals(
     };
 
     let is_fresh_funded = age_days < 1 && tx_count_total < 5;
-    let unique_counterparties_30d = (tx_count_30d as f64 * 0.6).round() as u64;
-    let program_diversity_30d = (tx_count_30d as f64 * 0.3).round().min(20.0) as u64;
     let funding_source_risk = funding_source_from_sigs(tx_count_total, age_days, first_seen_ts);
 
+    // Counterparty / program metrics require parsed transactions (P1).
+    // Until then they are reported as null, never synthesized from tx counts.
     Ok(ChainSignals {
         age_days,
         tx_count_total,
         tx_count_30d,
-        unique_counterparties_30d,
+        unique_counterparties_30d: None,
         sol_balance_lamports: sol_balance,
         spl_account_count,
         has_activity_48h,
-        program_diversity_30d,
+        program_diversity_30d: None,
         is_fresh_funded,
         funding_source_risk,
         first_seen_ts,
         latest_tx_ts,
         counterparty_metrics_estimated: true,
-        sig_pages_fetched: max_pages.min(tx_count_total.div_ceil(100) as u32),
+        sig_pages_fetched: pages_fetched,
     })
 }

@@ -1,10 +1,13 @@
-//! Additive wallet risk scoring model (v1.1).
+//! Additive wallet risk scoring model (v1.2).
 
 use crate::signals::chain::ChainSignals;
 use crate::signals::labels::{allow_index, deny_index};
 use serde::Serialize;
 
-pub const SCORING_VERSION: &str = "1.1.1";
+// 1.2.0: counterparty/program metrics are null unless measured (previously
+// synthesized from tx counts). Scoring math unchanged for live traffic —
+// the activity bonus already required `counterparty_metrics_estimated == false`.
+pub const SCORING_VERSION: &str = "1.2.0";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RiskResult {
@@ -80,7 +83,7 @@ pub fn score_wallet(wallet: &str, signals: &ChainSignals) -> RiskResult {
 
     if !signals.counterparty_metrics_estimated
         && signals.tx_count_30d >= 10
-        && signals.unique_counterparties_30d >= 5
+        && signals.unique_counterparties_30d.unwrap_or(0) >= 5
     {
         score -= 10;
     }
@@ -168,11 +171,11 @@ mod tests {
             age_days: 200,
             tx_count_total: 100,
             tx_count_30d: 30,
-            unique_counterparties_30d: 15,
+            unique_counterparties_30d: Some(15),
             sol_balance_lamports: 500_000_000,
             spl_account_count: 5,
             has_activity_48h: true,
-            program_diversity_30d: 8,
+            program_diversity_30d: Some(8),
             is_fresh_funded: false,
             funding_source_risk: "untraced".to_string(),
             first_seen_ts: 1700000000,
@@ -190,7 +193,7 @@ mod tests {
         );
         assert!(result.risk_score <= 24, "score={}", result.risk_score);
         assert_eq!(result.risk_band, "LOW");
-        assert_eq!(result.scoring_version, "1.1.1");
+        assert_eq!(result.scoring_version, SCORING_VERSION);
     }
 
     #[test]
@@ -219,7 +222,7 @@ mod tests {
         signals.age_days = 0;
         signals.tx_count_total = 2;
         signals.tx_count_30d = 2;
-        signals.unique_counterparties_30d = 1;
+        signals.unique_counterparties_30d = Some(1);
         let result = score_wallet("FreshWallet1111111111111111111111111111111111", &signals);
         assert!(result.risk_score >= 25, "score={}", result.risk_score);
         assert!(result.flags.contains(&"FRESH_FUNDED".to_string()));

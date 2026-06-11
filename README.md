@@ -2,13 +2,13 @@
 
 Dual-mode x402 seller: **per-call** micropayments **and** **subscription JWT** on the same data routes.
 
-**Production status (v0.2.1):** **wallet-risk** and **subscription** are production-ready for buyer agents — curated deny/allow labels (6,900+ / 20+), honest scoring (v1.1.1), and machine-action fields (`recommendation`, `cache_hit`, `cluster`). **token-risk** is **beta** (on-chain mint/holder signals only; LP and deployer depth are P1). **tx-risk** is **reserved** — route returns **501** and is not billed (see below).
+**Production status (v0.2.2):** **wallet-risk** and **subscription** are production-ready for buyer agents — curated deny/allow labels (6,900+ / 20+), honest scoring (v1.2.0; unmeasured signals are `null`, never synthesized), and machine-action fields (`recommendation`, `cache_hit`, `cluster`). Payment settles before RPC work (Solana blockhash expiry makes verify→serve→settle unsafe); if scoring then fails, the 503 carries the settlement proof (`PAYMENT-RESPONSE` header + `settlement_sig`) for reconciliation. **token-risk** is **beta** (on-chain mint/holder signals only; LP and deployer depth are P1). **tx-risk** is **reserved** — route returns **501** and is not billed (see below).
 
 ## Endpoints
 
 | Route | Status | Auth | Description |
 |-------|--------|------|-------------|
-| `GET /api/v1/wallet-risk?wallet=` | **Production** | Bearer **or** x402 | Wallet screening (scoring v1.1.1) |
+| `GET /api/v1/wallet-risk?wallet=` | **Production** | Bearer **or** x402 | Wallet screening (scoring v1.2.0) |
 | `GET /api/v1/token-risk?mint=` | **Beta** | Bearer **or** x402 | Token rug-pull heuristics |
 | `GET /api/v1/tx-risk?signature=` | **Reserved** | — | **501** — not a product SKU; planned P1 |
 | `POST /api/v1/subscribe?tier=` | **Production** | x402 only | Issue subscription JWT |

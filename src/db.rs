@@ -242,7 +242,7 @@ impl ParametersDb {
         .map_err(|e| Error::Internal(e.to_string()))?;
 
         let count: i32 = allowed.get("count");
-        Ok(count <= limit as i32)
+        Ok(count as i64 <= limit as i64)
     }
 
     pub async fn fetch_wallet_labels(&self) -> Result<Vec<LabelEntry>, Error> {

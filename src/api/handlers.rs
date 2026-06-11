@@ -17,7 +17,7 @@ use crate::x402::models::ResourceInfo;
 use chrono::Utc;
 use http::HeaderMap;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 use vercel_runtime::{Body, Response};
 
 pub use crate::api::common::RISK_CORS_ALLOW_HEADERS;
@@ -54,7 +54,18 @@ async fn maybe_cached(
     subject: &str,
 ) -> Option<(serde_json::Value, chrono::DateTime<chrono::Utc>)> {
     let db = state.db.as_deref()?;
-    db.get_cached_score(endpoint, subject).await.ok().flatten()
+    match db.get_cached_score(endpoint, subject).await {
+        Ok(hit) => hit,
+        Err(e) => {
+            warn!(
+                endpoint,
+                subject,
+                error = %e,
+                "score cache read failed; scoring fresh"
+            );
+            None
+        }
+    }
 }
 
 fn enrich_cached(
@@ -101,9 +112,17 @@ async fn write_cache_and_log(
     signals_json: Option<serde_json::Value>,
 ) {
     if let Some(db) = state.db.as_deref() {
-        let _ = db
+        if let Err(e) = db
             .set_cached_score(endpoint, subject, score, band, body, scoring_version, 300)
-            .await;
+            .await
+        {
+            warn!(
+                endpoint,
+                subject,
+                error = %e,
+                "score cache write failed"
+            );
+        }
         let _ = db
             .log_scoring(
                 endpoint,

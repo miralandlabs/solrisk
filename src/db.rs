@@ -322,33 +322,61 @@ impl ParametersDb {
         scoring_version: &str,
         ttl_secs: i64,
     ) -> Result<(), Error> {
-        let client = self.conn().await?;
-        self.exec_in_tx(
-            client,
-            r#"
-            INSERT INTO solrisk_score_cache
-                (endpoint, subject, score, band, response_json, scoring_version, cached_at, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW() + ($7 || ' seconds')::interval)
-            ON CONFLICT (endpoint, subject) DO UPDATE SET
-                score = EXCLUDED.score,
-                band = EXCLUDED.band,
-                response_json = EXCLUDED.response_json,
-                scoring_version = EXCLUDED.scoring_version,
-                cached_at = NOW(),
-                expires_at = EXCLUDED.expires_at
-            "#,
-            &[
-                &endpoint,
-                &subject,
-                &score,
-                &band,
-                &response,
-                &scoring_version,
-                &ttl_secs.to_string(),
-            ],
-            "cache write",
+        let mut client = self.conn().await?;
+        let label = "cache write";
+        let tx = Self::open_transaction(&mut client, label).await?;
+
+        // DELETE + INSERT instead of ON CONFLICT — shared Supabase DBs may still
+        // have a legacy PK from v0.1 where 002_parameters_v2 PK migration failed
+        // silently (EXCEPTION handler), which breaks ON CONFLICT (endpoint, subject).
+        timeout(
+            Self::QUERY_TIMEOUT,
+            tx.execute(
+                "DELETE FROM solrisk_score_cache WHERE endpoint = $1 AND subject = $2",
+                &[&endpoint, &subject],
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| {
+            Error::Internal(format!(
+                "{} delete timed out after {:?}",
+                label,
+                Self::QUERY_TIMEOUT
+            ))
+        })?
+        .map_err(|e| Error::Internal(format!("{} delete failed: {}", label, e)))?;
+
+        let rows = timeout(
+            Self::QUERY_TIMEOUT,
+            tx.execute(
+                r#"
+                INSERT INTO solrisk_score_cache
+                    (endpoint, subject, score, band, response_json, scoring_version, cached_at, expires_at)
+                VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW() + ($7::int * INTERVAL '1 second'))
+                "#,
+                &[
+                    &endpoint,
+                    &subject,
+                    &score,
+                    &band,
+                    &response,
+                    &scoring_version,
+                    &ttl_secs,
+                ],
+            ),
+        )
+        .await
+        .map_err(|_| {
+            Error::Internal(format!(
+                "{} insert timed out after {:?}",
+                label,
+                Self::QUERY_TIMEOUT
+            ))
+        })?
+        .map_err(|e| Error::Internal(format!("{} insert failed: {}", label, e)))?;
+
+        Self::commit_transaction(tx, label).await?;
+        tracing::debug!(endpoint, subject, rows, ttl_secs, "score cache written");
         Ok(())
     }
 

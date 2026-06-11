@@ -97,12 +97,27 @@ pub fn subscribe_402_response(
         .unwrap()
 }
 
-pub fn ok_with_payment(body: Value, settlement: Option<&SettlementProof>) -> Response<Body> {
+fn settlement_sig_from_proof(proof: &SettlementProof) -> Option<String> {
+    proof
+        .response
+        .get("transaction")
+        .or_else(|| proof.response.get("signature"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+pub fn ok_with_payment(mut body: Value, settlement: Option<&SettlementProof>) -> Response<Body> {
     let mut builder = cors_headers(Response::builder().status(200))
         .header("Content-Type", "application/json")
         .header("X-API-Version", API_VERSION.to_string());
 
     if let Some(proof) = settlement {
+        if let Some(sig) = settlement_sig_from_proof(proof) {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("settlement_sig".to_string(), Value::String(sig));
+            }
+        }
         let hdr = proof.header_value();
         if !hdr.is_empty() {
             builder = builder.header("PAYMENT-RESPONSE", hdr);

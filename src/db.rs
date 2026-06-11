@@ -1,4 +1,8 @@
 //! Optional Postgres: parameters (v2 service/endpoint), subscriptions, rate limits, cache, audit.
+//!
+//! All SQL runs inside an explicit transaction with `SET LOCAL statement_timeout`,
+//! best-effort `DEALLOCATE ALL`, and wall-clock `timeout()` on pool get, BEGIN,
+//! each statement, and COMMIT — same pattern as `x402-buy-spl-token/src/db.rs`.
 
 use deadpool_postgres::{Client, Config, Pool, PoolConfig, Runtime};
 use openssl::ssl::{SslConnector, SslMethod};
@@ -6,7 +10,8 @@ use postgres_openssl::MakeTlsConnector;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::timeout;
-use tracing::warn;
+use tokio_postgres::types::ToSql;
+use tracing::{error, warn};
 
 use crate::constants::SERVICE;
 use crate::error::Error;
@@ -18,11 +23,20 @@ pub struct ParametersDb {
 }
 
 impl ParametersDb {
+    // --- Pool timeouts (deadpool-level) ---
     const WAIT: Duration = Duration::from_secs(15);
     const CREATE: Duration = Duration::from_secs(10);
     const RECYCLE: Duration = Duration::from_secs(30);
-    const DEALLOCATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    // --- Per-call timeouts (tokio-level, wrap every wire step) ---
+    const POOL_GET_TIMEOUT: Duration = Duration::from_secs(20);
+    const TX_BEGIN_TIMEOUT: Duration = Duration::from_secs(20);
+    const SET_LOCAL_CMD_TIMEOUT: Duration = Duration::from_secs(5);
     const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
+    const DEALLOCATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Per-statement ceiling enforced by Postgres (below [`Self::QUERY_TIMEOUT`]).
+    const PG_STATEMENT_TIMEOUT: &'static str = "25s";
 
     pub fn connect(database_url: impl Into<String>) -> Result<Self, Error> {
         let mut cfg = Config::new();
@@ -58,9 +72,14 @@ impl ParametersDb {
     }
 
     async fn conn(&self) -> Result<Client, Error> {
-        self.pool
-            .get()
+        timeout(Self::POOL_GET_TIMEOUT, self.pool.get())
             .await
+            .map_err(|_| {
+                Error::Internal(format!(
+                    "db pool get timed out after {:?}",
+                    Self::POOL_GET_TIMEOUT
+                ))
+            })?
             .map_err(|e| Error::Internal(format!("db pool: {}", e)))
     }
 
@@ -83,12 +102,8 @@ impl ParametersDb {
         service: &str,
     ) -> Result<Vec<(String, String, String)>, Error> {
         let mut client = self.conn().await?;
-        let tx = client
-            .transaction()
-            .await
-            .map_err(|e| Error::Internal(e.to_string()))?;
-
-        let _ = timeout(Self::DEALLOCATE_TIMEOUT, tx.execute("DEALLOCATE ALL", &[])).await;
+        let label = "fetch service parameters";
+        let tx = Self::open_transaction(&mut client, label).await?;
 
         let v2 = timeout(
             Self::QUERY_TIMEOUT,
@@ -118,16 +133,18 @@ impl ParametersDb {
                         (endpoint, param_name, param_value)
                     })
                     .collect();
-                tx.commit()
-                    .await
-                    .map_err(|e| Error::Internal(e.to_string()))?;
+                Self::commit_transaction(tx, label).await?;
                 return Ok(out);
             }
             Ok(Err(e)) => {
                 warn!(error = %e, "v2 parameters query failed; trying legacy");
             }
             Err(_) => {
-                return Err(Error::Internal("parameters query timed out".into()));
+                return Err(Error::Internal(format!(
+                    "{} timed out after {:?}",
+                    label,
+                    Self::QUERY_TIMEOUT
+                )));
             }
             _ => {}
         }
@@ -147,8 +164,14 @@ impl ParametersDb {
             ),
         )
         .await
-        .map_err(|_| Error::Internal("parameters query timed out".into()))?
-        .map_err(|e| Error::Internal(e.to_string()))?;
+        .map_err(|_| {
+            Error::Internal(format!(
+                "{} legacy timed out after {:?}",
+                label,
+                Self::QUERY_TIMEOUT
+            ))
+        })?
+        .map_err(|e| Error::Internal(format!("{} legacy query failed: {}", label, e)))?;
 
         let out: Vec<(String, String, String)> = rows
             .iter()
@@ -159,9 +182,7 @@ impl ParametersDb {
             })
             .collect();
 
-        tx.commit()
-            .await
-            .map_err(|e| Error::Internal(e.to_string()))?;
+        Self::commit_transaction(tx, label).await?;
         Ok(out)
     }
 
@@ -174,40 +195,35 @@ impl ParametersDb {
         tx_sig: Option<&str>,
     ) -> Result<(), Error> {
         let client = self.conn().await?;
-        timeout(
-            Self::QUERY_TIMEOUT,
-            client.execute(
-                r#"
-                INSERT INTO solrisk_subscriptions (payer, tier, issued_at, expires_at, tx_sig)
-                VALUES ($1, $2, $3, $4, $5)
-                "#,
-                &[&payer, &tier, &issued_at, &expires_at, &tx_sig],
-            ),
+        self.exec_in_tx(
+            client,
+            r#"
+            INSERT INTO solrisk_subscriptions (payer, tier, issued_at, expires_at, tx_sig)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+            &[&payer, &tier, &issued_at, &expires_at, &tx_sig],
+            "record subscription",
         )
-        .await
-        .map_err(|_| Error::Internal("record_subscription timed out".into()))?
-        .map_err(|e| Error::Internal(e.to_string()))?;
+        .await?;
         Ok(())
     }
 
     pub async fn is_revoked(&self, payer: &str, issued_at: i64) -> Result<bool, Error> {
-        let client = self.conn().await?;
         let issued = chrono::DateTime::from_timestamp(issued_at, 0)
             .ok_or_else(|| Error::Internal("invalid iat".into()))?;
-        let row = timeout(
-            Self::QUERY_TIMEOUT,
-            client.query_opt(
+        let client = self.conn().await?;
+        let row = self
+            .query_opt_in_tx(
+                client,
                 r#"
                 SELECT revoked FROM solrisk_subscriptions
                 WHERE payer = $1 AND issued_at = $2
                 LIMIT 1
                 "#,
                 &[&payer, &issued],
-            ),
-        )
-        .await
-        .map_err(|_| Error::Internal("is_revoked timed out".into()))?
-        .map_err(|e| Error::Internal(e.to_string()))?;
+                "is revoked",
+            )
+            .await?;
         Ok(row.map(|r| r.get::<_, bool>("revoked")).unwrap_or(false))
     }
 
@@ -218,9 +234,9 @@ impl ParametersDb {
         _window_secs: u64,
     ) -> Result<bool, Error> {
         let client = self.conn().await?;
-        let allowed = timeout(
-            Self::QUERY_TIMEOUT,
-            client.query_one(
+        let rows = self
+            .query_in_tx(
+                client,
                 r#"
                 WITH w AS (
                     SELECT date_trunc('minute', NOW()) AS window_start
@@ -235,32 +251,28 @@ impl ParametersDb {
                 SELECT count FROM upsert
                 "#,
                 &[&bucket_key],
-            ),
-        )
-        .await
-        .map_err(|_| Error::Internal("rate limit timed out".into()))?
-        .map_err(|e| Error::Internal(e.to_string()))?;
+                "rate limit",
+            )
+            .await?;
 
-        let count: i32 = allowed.get("count");
+        let count: i32 = rows.first().map(|r| r.get("count")).unwrap_or(0);
         Ok(count as i64 <= limit as i64)
     }
 
     pub async fn fetch_wallet_labels(&self) -> Result<Vec<LabelEntry>, Error> {
         let client = self.conn().await?;
-        let rows = timeout(
-            Self::QUERY_TIMEOUT,
-            client.query(
+        let rows = self
+            .query_in_tx(
+                client,
                 r#"
                 SELECT wallet_pubkey, source, label, weight
                 FROM solrisk_wallet_labels
                 ORDER BY wallet_pubkey ASC
                 "#,
                 &[],
-            ),
-        )
-        .await
-        .map_err(|_| Error::Internal("labels query timed out".into()))?
-        .map_err(|e| Error::Internal(e.to_string()))?;
+                "fetch wallet labels",
+            )
+            .await?;
 
         Ok(rows
             .iter()
@@ -280,19 +292,17 @@ impl ParametersDb {
         subject: &str,
     ) -> Result<Option<(serde_json::Value, chrono::DateTime<chrono::Utc>)>, Error> {
         let client = self.conn().await?;
-        let row = timeout(
-            Self::QUERY_TIMEOUT,
-            client.query_opt(
+        let row = self
+            .query_opt_in_tx(
+                client,
                 r#"
                 SELECT response_json, cached_at FROM solrisk_score_cache
                 WHERE endpoint = $1 AND subject = $2 AND expires_at > NOW()
                 "#,
                 &[&endpoint, &subject],
-            ),
-        )
-        .await
-        .map_err(|_| Error::Internal("cache read timed out".into()))?
-        .map_err(|e| Error::Internal(e.to_string()))?;
+                "cache read",
+            )
+            .await?;
 
         Ok(row.map(|r| {
             let json: serde_json::Value = r.get("response_json");
@@ -313,35 +323,32 @@ impl ParametersDb {
         ttl_secs: i64,
     ) -> Result<(), Error> {
         let client = self.conn().await?;
-        timeout(
-            Self::QUERY_TIMEOUT,
-            client.execute(
-                r#"
-                INSERT INTO solrisk_score_cache
-                    (endpoint, subject, score, band, response_json, scoring_version, cached_at, expires_at)
-                VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW() + ($7 || ' seconds')::interval)
-                ON CONFLICT (endpoint, subject) DO UPDATE SET
-                    score = EXCLUDED.score,
-                    band = EXCLUDED.band,
-                    response_json = EXCLUDED.response_json,
-                    scoring_version = EXCLUDED.scoring_version,
-                    cached_at = NOW(),
-                    expires_at = EXCLUDED.expires_at
-                "#,
-                &[
-                    &endpoint,
-                    &subject,
-                    &score,
-                    &band,
-                    &response,
-                    &scoring_version,
-                    &ttl_secs.to_string(),
-                ],
-            ),
+        self.exec_in_tx(
+            client,
+            r#"
+            INSERT INTO solrisk_score_cache
+                (endpoint, subject, score, band, response_json, scoring_version, cached_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW() + ($7 || ' seconds')::interval)
+            ON CONFLICT (endpoint, subject) DO UPDATE SET
+                score = EXCLUDED.score,
+                band = EXCLUDED.band,
+                response_json = EXCLUDED.response_json,
+                scoring_version = EXCLUDED.scoring_version,
+                cached_at = NOW(),
+                expires_at = EXCLUDED.expires_at
+            "#,
+            &[
+                &endpoint,
+                &subject,
+                &score,
+                &band,
+                &response,
+                &scoring_version,
+                &ttl_secs.to_string(),
+            ],
+            "cache write",
         )
-        .await
-        .map_err(|_| Error::Internal("cache write timed out".into()))?
-        .map_err(|e| Error::Internal(e.to_string()))?;
+        .await?;
         Ok(())
     }
 
@@ -359,9 +366,9 @@ impl ParametersDb {
         settlement_sig: Option<&str>,
     ) -> Result<(), Error> {
         let client = self.conn().await?;
-        let _ = timeout(
-            Self::QUERY_TIMEOUT,
-            client.execute(
+        match self
+            .exec_in_tx(
+                client,
                 r#"
                 INSERT INTO solrisk_scoring_log
                     (wallet_pubkey, endpoint, subject, score, band, scoring_version,
@@ -380,9 +387,150 @@ impl ParametersDb {
                     &correlation_id,
                     &settlement_sig,
                 ],
+                "scoring log",
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                warn!(error = %e, "scoring log insert failed");
+                Ok(())
+            }
+        }
+    }
+
+    // --- Transaction helpers (mirror x402-buy-spl-token) --------------------
+
+    async fn open_transaction<'a>(
+        client: &'a mut Client,
+        label: &str,
+    ) -> Result<deadpool_postgres::Transaction<'a>, Error> {
+        let tx = Self::begin_transaction(client, label).await?;
+        Self::set_statement_timeout_local(&tx).await;
+        Self::deallocate_prepared(&tx).await;
+        Ok(tx)
+    }
+
+    async fn begin_transaction<'a>(
+        client: &'a mut Client,
+        label: &str,
+    ) -> Result<deadpool_postgres::Transaction<'a>, Error> {
+        timeout(Self::TX_BEGIN_TIMEOUT, client.transaction())
+            .await
+            .map_err(|_| {
+                Error::Internal(format!(
+                    "{} transaction start timed out after {:?} (pool connection may be stale)",
+                    label,
+                    Self::TX_BEGIN_TIMEOUT
+                ))
+            })?
+            .map_err(|e| Error::Internal(format!("{} transaction start failed: {}", label, e)))
+    }
+
+    async fn set_statement_timeout_local(tx: &deadpool_postgres::Transaction<'_>) {
+        let sql = format!(
+            "SET LOCAL statement_timeout = '{}'",
+            Self::PG_STATEMENT_TIMEOUT
+        );
+        match timeout(Self::SET_LOCAL_CMD_TIMEOUT, tx.execute(sql.as_str(), &[])).await {
+            Ok(Ok(_)) => (),
+            Ok(Err(e)) => error!(error = %e, "SET LOCAL statement_timeout failed"),
+            Err(_) => error!(
+                "SET LOCAL statement_timeout timed out after {:?}",
+                Self::SET_LOCAL_CMD_TIMEOUT
             ),
-        )
-        .await;
-        Ok(())
+        }
+    }
+
+    async fn deallocate_prepared(tx: &deadpool_postgres::Transaction<'_>) {
+        let _ = timeout(Self::DEALLOCATE_TIMEOUT, tx.execute("DEALLOCATE ALL", &[])).await;
+    }
+
+    async fn commit_transaction(
+        tx: deadpool_postgres::Transaction<'_>,
+        label: &str,
+    ) -> Result<(), Error> {
+        timeout(Self::QUERY_TIMEOUT, tx.commit())
+            .await
+            .map_err(|_| {
+                Error::Internal(format!(
+                    "{} commit timed out after {:?}",
+                    label,
+                    Self::QUERY_TIMEOUT
+                ))
+            })?
+            .map_err(|e| Error::Internal(format!("{} commit failed: {}", label, e)))
+    }
+
+    async fn exec_in_tx(
+        &self,
+        mut client: Client,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+        label: &str,
+    ) -> Result<u64, Error> {
+        let tx = Self::open_transaction(&mut client, label).await?;
+
+        let rows = timeout(Self::QUERY_TIMEOUT, tx.execute(sql, params))
+            .await
+            .map_err(|_| {
+                Error::Internal(format!(
+                    "{} timed out after {:?}",
+                    label,
+                    Self::QUERY_TIMEOUT
+                ))
+            })?
+            .map_err(|e| Error::Internal(format!("{} query failed: {}", label, e)))?;
+
+        Self::commit_transaction(tx, label).await?;
+        Ok(rows)
+    }
+
+    async fn query_opt_in_tx(
+        &self,
+        mut client: Client,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+        label: &str,
+    ) -> Result<Option<tokio_postgres::Row>, Error> {
+        let tx = Self::open_transaction(&mut client, label).await?;
+
+        let row = timeout(Self::QUERY_TIMEOUT, tx.query_opt(sql, params))
+            .await
+            .map_err(|_| {
+                Error::Internal(format!(
+                    "{} timed out after {:?}",
+                    label,
+                    Self::QUERY_TIMEOUT
+                ))
+            })?
+            .map_err(|e| Error::Internal(format!("{} query failed: {}", label, e)))?;
+
+        Self::commit_transaction(tx, label).await?;
+        Ok(row)
+    }
+
+    async fn query_in_tx(
+        &self,
+        mut client: Client,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+        label: &str,
+    ) -> Result<Vec<tokio_postgres::Row>, Error> {
+        let tx = Self::open_transaction(&mut client, label).await?;
+
+        let rows = timeout(Self::QUERY_TIMEOUT, tx.query(sql, params))
+            .await
+            .map_err(|_| {
+                Error::Internal(format!(
+                    "{} timed out after {:?}",
+                    label,
+                    Self::QUERY_TIMEOUT
+                ))
+            })?
+            .map_err(|e| Error::Internal(format!("{} query failed: {}", label, e)))?;
+
+        Self::commit_transaction(tx, label).await?;
+        Ok(rows)
     }
 }

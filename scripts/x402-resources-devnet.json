@@ -21,7 +21,7 @@
         "failureContract": "503 RPC_ERROR after settlement includes settlement_sig + PAYMENT-RESPONSE header for reconciliation",
         "docs": "GET /agent-integration.md"
       },
-      "tags": ["solana", "wallet", "risk", "screening", "compliance", "x402"]
+      "tags": ["solana", "wallet", "risk", "screening", "x402"]
     },
     {
       "id": "token-risk",
@@ -40,7 +40,7 @@
         "failureContract": "503 RPC_ERROR after settlement includes settlement_sig + PAYMENT-RESPONSE header for reconciliation",
         "docs": "GET /agent-integration.md"
       },
-      "tags": ["solana", "token", "rug-pull", "risk", "beta", "x402"]
+      "tags": ["solana", "token", "rug-pull", "risk", "beta"]
     },
     {
       "id": "subscribe-hourly",

@@ -1,44 +1,47 @@
-# solrisk — Solana Wallet Risk Scoring (x402)
+# solrisk — Solana Risk Scoring (x402 v2)
 
-Pay-per-call wallet risk scoring for Solana, using **HTTP 402** with **x402 v2** payloads and the **pr402** facilitator.
+Dual-mode x402 seller: **per-call** micropayments **and** **subscription JWT** on the same data routes.
 
-## What it does
+## Endpoints
 
-One endpoint: `GET /api/v1/wallet-risk?wallet=<base58>`
+| Route | Auth | Description |
+|-------|------|-------------|
+| `GET /api/v1/wallet-risk?wallet=` | Bearer **or** x402 | Wallet risk (scoring v1.1.0) |
+| `GET /api/v1/token-risk?mint=` | Bearer **or** x402 | Token rug-pull risk |
+| `GET /api/v1/tx-risk?signature=` | Bearer **or** x402 | Transaction risk |
+| `POST /api/v1/subscribe?tier=` | x402 only | Issue subscription JWT |
+| `GET /api/v1/subscribe/info` | none | Tier catalog |
 
-Returns:
-- **risk_score** (0–100)
-- **risk_band** (LOW / MEDIUM / HIGH / CRITICAL)
-- **signals** — chain-derived metrics (age, activity, counterparty diversity, dust patterns, funding source)
-- **flags** — triggered risk indicators
-- **labels** — matches from curated allow/deny lists (OFAC, Chainabuse, internal)
-- **confidence** — data-coverage heuristic (not prediction accuracy)
-- **scoring_version** — versioned formula for reproducibility
+## Pricing (mainnet seeds)
 
-## Pricing
+| SKU | Per-call | Subscribe hourly |
+|-----|----------|------------------|
+| wallet-risk | $0.05 | — |
+| token-risk | $0.10 | — |
+| tx-risk | $0.05 | — |
+| all routes (bundle) | — | $1.00 / $5.00 daily / $25.00 monthly |
 
-- **Paid:** $0.05 USDC per call via x402 v2 (`PAYMENT-SIGNATURE` header)
-
-## Architecture
-
-Same stack as `spl-token-balance-serverless`:
-- Rust serverless on Vercel (`vercel-rust`)
-- x402 payment gate (pr402 facilitator verify + settle)
-- Shared Supabase DB (tables prefixed `solrisk_`; `parameters` table shared with `SOLRISK_` param_name prefix)
+Preview uses `migrations/parameters-seed-devnet.sql` (lower subscribe prices).
 
 ## Setup
 
-1. Copy `env.example` to `.env` and fill in values.
-2. Run `migrations/init.sql` against your Supabase DB.
-3. Deploy: `vercel deploy`
+1. Copy `env.example` → `.env` (`X402_*`, `RPC_URL`, `JWT_SECRET` for subscription).
+2. Run `migrations/init.sql` (complete v2 schema).
+3. Seed pricing: `parameters-seed-devnet.sql` or `parameters-seed-mainnet.sql`.
+   (Only run `002_parameters_v2.sql` when upgrading an existing v0.1 database.)
+4. `vercel deploy`
 
-## Shared DB discipline
+See [migrations/CUTOVER.md](migrations/CUTOVER.md) for shared Supabase cutover.
 
-This project shares a Supabase instance with `spl-token-balance-serverless`:
-- **`parameters` table** is shared. solrisk uses `SOLRISK_*` param_name prefix; spl-balance uses `SPL_BALANCE_*`.
-- **All other tables** use `solrisk_` prefix: `solrisk_wallet_labels`, `solrisk_scoring_log`, `solrisk_scam_reports`, `solrisk_score_cache`.
-- **Different seller wallet + vault PDA** — separate row in pr402 `/providers`.
+## Verify
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --bin risk_api -- -D warnings
+cargo test --lib
+cargo build --bin risk_api
+```
 
 ## x402 Ecosystem
 
-Part of the [x402 ecosystem](https://github.com/miraland-labs/x402). Facilitator: [pr402](https://github.com/miralandlabs/pr402).
+Part of [miraland-labs/x402](https://github.com/miraland-labs/x402). Dual-mode reference alongside [SUBSCRIPTION_PATTERN.md](../SUBSCRIPTION_PATTERN.md).

@@ -1,49 +1,28 @@
-//! Wallet risk scoring API handlers.
+//! Risk scoring API handlers (wallet, token, tx).
 
+use crate::api::common::{
+    error_response, extract_query_param, handle_auth_error, ok_with_payment, payer_from_auth,
+    settlement_from_auth, settlement_sig_from_auth,
+};
+use crate::auth::dual::{authenticate_data_route, DataAuth};
+use crate::constants::API_VERSION;
+use crate::pricing::{self, ENDPOINT_TOKEN_RISK, ENDPOINT_TX_RISK, ENDPOINT_WALLET_RISK};
 use crate::scoring;
+use crate::scoring_token;
+use crate::scoring_tx;
 use crate::signals::chain;
+use crate::signals::labels;
+use crate::signals::token;
 use crate::state::AppState;
-use crate::x402::payment_handler::{PaymentGateError, PaymentHandler};
-use base64::Engine;
+use crate::x402::models::ResourceInfo;
 use chrono::Utc;
 use http::HeaderMap;
 use std::sync::Arc;
 use tracing::info;
 use vercel_runtime::{Body, Response};
 
-pub const RISK_CORS_ALLOW_HEADERS: &str =
-    "Content-Type, Authorization, PAYMENT-SIGNATURE, Payment-Required, PAYMENT-RESPONSE, X-API-Version, X-Correlation-ID";
+pub use crate::api::common::RISK_CORS_ALLOW_HEADERS;
 
-fn cors_headers(builder: http::response::Builder) -> http::response::Builder {
-    builder
-        .header("Access-Control-Allow-Origin", "*")
-        .header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        .header("Access-Control-Allow-Headers", RISK_CORS_ALLOW_HEADERS)
-        .header(
-            "Access-Control-Expose-Headers",
-            "Payment-Required, PAYMENT-RESPONSE, X-Correlation-ID, X-API-Version",
-        )
-}
-
-fn json_response(status: u16, body: serde_json::Value) -> Response<Body> {
-    cors_headers(Response::builder().status(status))
-        .header("Content-Type", "application/json")
-        .body(Body::Text(body.to_string()))
-        .unwrap()
-}
-
-fn error_response(status: u16, code: &str, message: &str) -> Response<Body> {
-    json_response(
-        status,
-        serde_json::json!({
-            "error": code,
-            "message": message,
-            "code": code,
-        }),
-    )
-}
-
-/// `GET /health`
 pub async fn handle_health(state: Arc<AppState>) -> Response<Body> {
     let db_ok = if let Some(db) = state.db.as_ref() {
         db.fetch_parameters_map().await.is_ok()
@@ -54,22 +33,64 @@ pub async fn handle_health(state: Arc<AppState>) -> Response<Body> {
         "status": "ok",
         "service": "solrisk",
         "version": env!("CARGO_PKG_VERSION"),
+        "api_version": API_VERSION,
         "db_connected": db_ok,
-        "scoring_version": scoring::SCORING_VERSION,
+        "wallet_scoring_version": scoring::SCORING_VERSION,
+        "token_scoring_version": scoring_token::SCORING_VERSION,
     });
-    cors_headers(Response::builder().status(200))
+    crate::api::common::cors_headers(Response::builder().status(200))
         .header("Content-Type", "application/json")
+        .header("X-API-Version", API_VERSION.to_string())
         .body(Body::Text(body.to_string()))
         .unwrap()
 }
 
-/// `GET /api/v1/wallet-risk?wallet=<base58>`
+async fn maybe_cached(
+    state: &AppState,
+    endpoint: &str,
+    subject: &str,
+) -> Option<serde_json::Value> {
+    let db = state.db.as_deref()?;
+    db.get_cached_score(endpoint, subject).await.ok().flatten()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_cache_and_log(
+    state: &AppState,
+    endpoint: &str,
+    subject: &str,
+    body: &serde_json::Value,
+    score: i32,
+    band: &str,
+    scoring_version: &str,
+    auth: &DataAuth,
+    signals_json: Option<serde_json::Value>,
+) {
+    if let Some(db) = state.db.as_deref() {
+        let _ = db
+            .set_cached_score(endpoint, subject, score, band, body, scoring_version, 300)
+            .await;
+        let _ = db
+            .log_scoring(
+                endpoint,
+                subject,
+                score,
+                band,
+                scoring_version,
+                signals_json,
+                payer_from_auth(auth).as_deref(),
+                None,
+                settlement_sig_from_auth(auth).as_deref(),
+            )
+            .await;
+    }
+}
+
 pub async fn handle_wallet_risk(
     headers: &HeaderMap,
     query: &str,
     state: Arc<AppState>,
 ) -> Response<Body> {
-    // Parse wallet from query string
     let wallet = extract_query_param(query, "wallet");
     if wallet.is_empty() || wallet.len() < 32 || wallet.len() > 44 {
         return error_response(
@@ -79,36 +100,26 @@ pub async fn handle_wallet_risk(
         );
     }
 
-    info!(wallet = %wallet, "handle_wallet_risk: start");
+    if let Some(cached) = maybe_cached(&state, ENDPOINT_WALLET_RISK, wallet).await {
+        return ok_with_payment(cached, None);
+    }
 
-    // x402 payment gate
-    let resource = crate::x402::models::ResourceInfo {
+    let resource = ResourceInfo {
         url: state
             .config
             .x402_resource_url_for_request(headers, "/api/v1/wallet-risk", query),
-        description: "Solana wallet risk score".to_string(),
+        description: pricing::resource_description(ENDPOINT_WALLET_RISK).to_string(),
         mime_type: "application/json".to_string(),
     };
 
-    let settlement_proof = match PaymentHandler::check_payment(&state, headers, resource).await {
-        Ok(proof) => proof,
-        Err(PaymentGateError::Required(payment_required)) => {
-            let payment_json =
-                serde_json::to_string(&payment_required).unwrap_or_else(|_| "{}".to_string());
-            let payment_header =
-                base64::engine::general_purpose::STANDARD.encode(payment_json.as_bytes());
-            return cors_headers(Response::builder().status(402))
-                .header("Content-Type", "application/json")
-                .header("Payment-Required", payment_header)
-                .body(Body::Text(payment_json))
-                .unwrap();
-        }
-        Err(PaymentGateError::RequirementsUnavailable(msg)) => {
-            return error_response(503, "PAYMENT_REQUIREMENTS_UNAVAILABLE", &msg);
-        }
+    let auth = match authenticate_data_route(&state, headers, ENDPOINT_WALLET_RISK, resource).await
+    {
+        Ok(a) => a,
+        Err(e) => return handle_auth_error(e),
     };
 
-    // Collect chain signals
+    labels::refresh_labels_from_db(state.db.as_deref()).await;
+
     let signals = match chain::collect_chain_signals(&state.rpc_client, wallet).await {
         Ok(s) => s,
         Err(e) => {
@@ -116,25 +127,15 @@ pub async fn handle_wallet_risk(
             return error_response(
                 503,
                 "RPC_ERROR",
-                &format!("Could not collect on-chain data for {}: {}", wallet, e),
+                &format!("Could not collect on-chain data for {wallet}: {e}"),
             );
         }
     };
 
-    // Score
     let result = scoring::score_wallet(wallet, &signals);
-
-    info!(
-        wallet = %wallet,
-        score = result.risk_score,
-        band = result.risk_band,
-        confidence = result.confidence,
-        "handle_wallet_risk: scored"
-    );
-
-    // Build response
     let checked_at = Utc::now().to_rfc3339();
     let body = serde_json::json!({
+        "api_version": API_VERSION,
         "wallet": wallet,
         "risk_score": result.risk_score,
         "risk_band": result.risk_band,
@@ -143,34 +144,158 @@ pub async fn handle_wallet_risk(
         "flags": result.flags,
         "labels": result.labels,
         "confidence": result.confidence,
+        "signal_quality": result.signal_quality,
         "scoring_version": result.scoring_version,
     });
 
-    // Attach PAYMENT-RESPONSE header if settlement proof exists
-    let mut builder = cors_headers(Response::builder().status(200))
-        .header("Content-Type", "application/json")
-        .header("X-API-Version", "1");
+    write_cache_and_log(
+        &state,
+        ENDPOINT_WALLET_RISK,
+        wallet,
+        &body,
+        result.risk_score as i32,
+        result.risk_band,
+        result.scoring_version,
+        &auth,
+        Some(serde_json::to_value(&result.signals).unwrap_or_default()),
+    )
+    .await;
 
-    if let Some(proof) = settlement_proof.as_ref() {
-        let hdr = proof.header_value();
-        if !hdr.is_empty() {
-            builder = builder.header("PAYMENT-RESPONSE", hdr);
-        }
-    }
-
-    builder.body(Body::Text(body.to_string())).unwrap()
+    info!(wallet = %wallet, score = result.risk_score, band = result.risk_band, "wallet-risk scored");
+    ok_with_payment(body, settlement_from_auth(&auth))
 }
 
-fn extract_query_param<'a>(query: &'a str, key: &str) -> &'a str {
-    query
-        .split('&')
-        .find_map(|pair| {
-            let (k, v) = pair.split_once('=')?;
-            if k == key {
-                Some(v)
-            } else {
-                None
-            }
-        })
-        .unwrap_or("")
+pub async fn handle_token_risk(
+    headers: &HeaderMap,
+    query: &str,
+    state: Arc<AppState>,
+) -> Response<Body> {
+    let mint = extract_query_param(query, "mint");
+    if mint.is_empty() || mint.len() < 32 || mint.len() > 44 {
+        return error_response(
+            400,
+            "BAD_REQUEST",
+            "Query parameter `mint` is required (Solana base58 mint, 32–44 chars).",
+        );
+    }
+
+    if let Some(cached) = maybe_cached(&state, ENDPOINT_TOKEN_RISK, mint).await {
+        return ok_with_payment(cached, None);
+    }
+
+    let resource = ResourceInfo {
+        url: state
+            .config
+            .x402_resource_url_for_request(headers, "/api/v1/token-risk", query),
+        description: pricing::resource_description(ENDPOINT_TOKEN_RISK).to_string(),
+        mime_type: "application/json".to_string(),
+    };
+
+    let auth = match authenticate_data_route(&state, headers, ENDPOINT_TOKEN_RISK, resource).await {
+        Ok(a) => a,
+        Err(e) => return handle_auth_error(e),
+    };
+
+    let signals = match token::collect_token_signals(&state.rpc_client, mint).await {
+        Ok(s) => s,
+        Err(e) => {
+            return error_response(
+                503,
+                "RPC_ERROR",
+                &format!("Token signal collection failed: {e}"),
+            );
+        }
+    };
+
+    let result = scoring_token::score_token(mint, &signals);
+    let body = serde_json::json!({
+        "api_version": API_VERSION,
+        "mint": mint,
+        "risk_domain": result.risk_domain,
+        "risk_score": result.risk_score,
+        "risk_band": result.risk_band,
+        "checked_at": Utc::now().to_rfc3339(),
+        "signals": result.signals,
+        "flags": result.flags,
+        "confidence": result.confidence,
+        "signal_quality": result.signal_quality,
+        "scoring_version": result.scoring_version,
+    });
+
+    write_cache_and_log(
+        &state,
+        ENDPOINT_TOKEN_RISK,
+        mint,
+        &body,
+        result.risk_score as i32,
+        result.risk_band,
+        result.scoring_version,
+        &auth,
+        Some(serde_json::to_value(&result.signals).unwrap_or_default()),
+    )
+    .await;
+
+    ok_with_payment(body, settlement_from_auth(&auth))
+}
+
+pub async fn handle_tx_risk(
+    headers: &HeaderMap,
+    query: &str,
+    state: Arc<AppState>,
+) -> Response<Body> {
+    let signature = extract_query_param(query, "signature");
+    if signature.is_empty() || signature.len() < 80 {
+        return error_response(
+            400,
+            "BAD_REQUEST",
+            "Query parameter `signature` is required (base58 tx signature).",
+        );
+    }
+
+    if let Some(cached) = maybe_cached(&state, ENDPOINT_TX_RISK, signature).await {
+        return ok_with_payment(cached, None);
+    }
+
+    let resource = ResourceInfo {
+        url: state
+            .config
+            .x402_resource_url_for_request(headers, "/api/v1/tx-risk", query),
+        description: pricing::resource_description(ENDPOINT_TX_RISK).to_string(),
+        mime_type: "application/json".to_string(),
+    };
+
+    let auth = match authenticate_data_route(&state, headers, ENDPOINT_TX_RISK, resource).await {
+        Ok(a) => a,
+        Err(e) => return handle_auth_error(e),
+    };
+
+    let result = scoring_tx::score_tx(signature);
+    let body = serde_json::json!({
+        "api_version": API_VERSION,
+        "signature": signature,
+        "risk_domain": result.risk_domain,
+        "risk_score": result.risk_score,
+        "risk_band": result.risk_band,
+        "checked_at": Utc::now().to_rfc3339(),
+        "signals": result.signals,
+        "flags": result.flags,
+        "confidence": result.confidence,
+        "signal_quality": result.signal_quality,
+        "scoring_version": result.scoring_version,
+    });
+
+    write_cache_and_log(
+        &state,
+        ENDPOINT_TX_RISK,
+        signature,
+        &body,
+        result.risk_score as i32,
+        result.risk_band,
+        result.scoring_version,
+        &auth,
+        None,
+    )
+    .await;
+
+    ok_with_payment(body, settlement_from_auth(&auth))
 }

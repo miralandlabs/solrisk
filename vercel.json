@@ -33,8 +33,14 @@
             "methods": ["GET", "HEAD", "OPTIONS"]
         },
         {
-            "src": "/.well-known/(.*)",
-            "dest": "/public/.well-known/$1"
+            "src": "/openapi.json",
+            "dest": "/src/bin/risk_api",
+            "methods": ["GET", "HEAD", "OPTIONS"]
+        },
+        {
+            "src": "/.well-known/x402-resources.json",
+            "dest": "/src/bin/risk_api",
+            "methods": ["GET", "HEAD", "OPTIONS"]
         },
         {
             "src": "/robots.txt",
@@ -45,14 +51,29 @@
             "dest": "/public/sitemap.xml"
         },
         {
-            "src": "/openapi.json",
+            "src": "/api/v1/wallet-risk",
             "dest": "/src/bin/risk_api",
             "methods": ["GET", "HEAD", "OPTIONS"]
         },
         {
-            "src": "/api/v1/wallet-risk",
+            "src": "/api/v1/token-risk",
             "dest": "/src/bin/risk_api",
             "methods": ["GET", "HEAD", "OPTIONS"]
+        },
+        {
+            "src": "/api/v1/tx-risk",
+            "dest": "/src/bin/risk_api",
+            "methods": ["GET", "HEAD", "OPTIONS"]
+        },
+        {
+            "src": "/api/v1/subscribe/info",
+            "dest": "/src/bin/risk_api",
+            "methods": ["GET", "HEAD", "OPTIONS"]
+        },
+        {
+            "src": "/api/v1/subscribe",
+            "dest": "/src/bin/risk_api",
+            "methods": ["POST", "OPTIONS"]
         }
     ]
 }

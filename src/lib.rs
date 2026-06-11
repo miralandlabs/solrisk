@@ -1,14 +1,21 @@
 pub mod api;
+pub mod auth;
 pub mod config;
+pub mod constants;
 pub mod db;
 pub mod error;
 pub mod init;
 pub mod parameters;
+pub mod pricing;
 pub mod route_handler;
 pub mod rpc_retry;
 pub mod scoring;
+pub mod scoring_token;
+pub mod scoring_tx;
 pub mod signals;
 pub mod state;
+pub mod subscription;
+pub mod well_known;
 pub mod x402;
 
 pub use error::Error;

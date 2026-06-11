@@ -1,9 +1,9 @@
 {
   "openapi": "3.0.0",
   "info": {
-    "title": "solrisk | Solana Wallet Risk Scoring",
-    "description": "Pay-per-call wallet risk scoring for Solana via x402 v2. Returns a 0–100 score, risk band, chain-derived signals, and label matches.",
-    "version": "0.1.0",
+    "title": "solrisk | Solana Risk Scoring",
+    "description": "Dual-mode x402 seller: per-call PAYMENT-SIGNATURE or subscription Bearer JWT on data routes. Wallet, token, and transaction risk scores.",
+    "version": "0.2.0",
     "contact": { "name": "Miraland Labs", "url": "https://miraland.io" }
   },
   "servers": [
@@ -16,61 +16,75 @@
         "summary": "Score a Solana wallet's risk",
         "operationId": "getWalletRisk",
         "parameters": [
-          {
-            "name": "wallet",
-            "in": "query",
-            "required": true,
-            "description": "Solana wallet address (base58, 32–44 chars).",
-            "schema": { "type": "string" }
-          },
-          {
-            "name": "PAYMENT-SIGNATURE",
-            "in": "header",
-            "required": true,
-            "description": "x402 v2 settlement proof (raw JSON or base64). Required for every call.",
-            "schema": { "type": "string" }
-          },
+          { "name": "wallet", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "Authorization", "in": "header", "required": false, "description": "Bearer subscription JWT", "schema": { "type": "string" } },
+          { "name": "PAYMENT-SIGNATURE", "in": "header", "required": false, "description": "x402 v2 per-call payment proof", "schema": { "type": "string" } }
         ],
         "responses": {
-          "200": {
-            "description": "Risk score result.",
-            "headers": {
-              "PAYMENT-RESPONSE": {
-                "description": "Base64 x402 settlement response when proof was included.",
-                "schema": { "type": "string" }
-              }
-            },
-            "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/WalletRiskResponse" } }
-            }
-          },
-          "400": {
-            "description": "Invalid wallet parameter.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          },
-          "402": {
-            "description": "Payment Required.",
-            "headers": {
-              "Payment-Required": { "description": "Base64 PaymentRequired JSON.", "schema": { "type": "string" } }
-            },
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PaymentRequired" } } }
-          },
-          "501": {
-            "description": "Scoring engine not yet implemented (MVP stub).",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
-          }
+          "200": { "description": "Risk score", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WalletRiskResponse" } } } },
+          "401": { "description": "Invalid/expired JWT", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "402": { "description": "Payment required (per-call)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PaymentRequired" } } } },
+          "429": { "description": "Rate limit", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/api/v1/token-risk": {
+      "get": {
+        "summary": "Score a token mint rug-pull risk",
+        "operationId": "getTokenRisk",
+        "parameters": [
+          { "name": "mint", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "Authorization", "in": "header", "required": false, "schema": { "type": "string" } },
+          { "name": "PAYMENT-SIGNATURE", "in": "header", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Token risk score", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TokenRiskResponse" } } } },
+          "402": { "description": "Payment required", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PaymentRequired" } } } }
+        }
+      }
+    },
+    "/api/v1/tx-risk": {
+      "get": {
+        "summary": "Score a transaction signature risk",
+        "operationId": "getTxRisk",
+        "parameters": [
+          { "name": "signature", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "Authorization", "in": "header", "required": false, "schema": { "type": "string" } },
+          { "name": "PAYMENT-SIGNATURE", "in": "header", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Tx risk score", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TxRiskResponse" } } } },
+          "402": { "description": "Payment required", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PaymentRequired" } } } }
+        }
+      }
+    },
+    "/api/v1/subscribe": {
+      "post": {
+        "summary": "Purchase subscription (x402 gate)",
+        "operationId": "postSubscribe",
+        "parameters": [
+          { "name": "tier", "in": "query", "required": true, "schema": { "type": "string", "enum": ["hourly", "daily", "monthly"] } },
+          { "name": "PAYMENT-SIGNATURE", "in": "header", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "JWT issued", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscribeResponse" } } } },
+          "402": { "description": "Payment required (JSON body only)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PaymentRequired" } } } }
+        }
+      }
+    },
+    "/api/v1/subscribe/info": {
+      "get": {
+        "summary": "Subscription tier catalog",
+        "operationId": "getSubscribeInfo",
+        "responses": {
+          "200": { "description": "Tier list and persistence hint", "content": { "application/json": { "schema": { "type": "object" } } } }
         }
       }
     },
     "/health": {
       "get": {
         "summary": "Service health",
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": { "application/json": { "schema": { "type": "object" } } }
-          }
-        }
+        "responses": { "200": { "description": "OK" } }
       }
     }
   },
@@ -79,15 +93,42 @@
       "WalletRiskResponse": {
         "type": "object",
         "properties": {
+          "api_version": { "type": "integer", "const": 2 },
           "wallet": { "type": "string" },
-          "risk_score": { "type": "integer", "minimum": 0, "maximum": 100 },
-          "risk_band": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
-          "checked_at": { "type": "string", "format": "date-time" },
-          "signals": { "type": "object" },
-          "flags": { "type": "array", "items": { "type": "string" } },
-          "labels": { "type": "array", "items": { "type": "object" } },
-          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-          "scoring_version": { "type": "string" }
+          "risk_score": { "type": "integer" },
+          "risk_band": { "type": "string" },
+          "signal_quality": { "type": "string", "enum": ["high", "medium", "low"] },
+          "scoring_version": { "type": "string", "example": "1.1.0" }
+        }
+      },
+      "TokenRiskResponse": {
+        "type": "object",
+        "properties": {
+          "api_version": { "type": "integer" },
+          "mint": { "type": "string" },
+          "risk_domain": { "type": "string", "const": "token" },
+          "risk_score": { "type": "integer" },
+          "scoring_version": { "type": "string", "example": "1.0.0" }
+        }
+      },
+      "TxRiskResponse": {
+        "type": "object",
+        "properties": {
+          "api_version": { "type": "integer" },
+          "signature": { "type": "string" },
+          "risk_domain": { "type": "string", "const": "tx" },
+          "risk_score": { "type": "integer" },
+          "scoring_version": { "type": "string", "example": "1.0.0" }
+        }
+      },
+      "SubscribeResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean" },
+          "token": { "type": "string" },
+          "tier": { "type": "string" },
+          "expiresAt": { "type": "string", "format": "date-time" },
+          "persistenceHint": { "type": "string" }
         }
       },
       "ErrorResponse": {
@@ -95,14 +136,14 @@
         "properties": {
           "error": { "type": "string" },
           "message": { "type": "string" },
-          "code": { "type": "string" }
+          "code": { "type": "string" },
+          "api_version": { "type": "integer" }
         }
       },
       "PaymentRequired": {
         "type": "object",
         "properties": {
           "x402Version": { "type": "integer", "const": 2 },
-          "error": { "type": "string" },
           "resource": { "type": "object" },
           "accepts": { "type": "array" },
           "extensions": { "type": "object" }

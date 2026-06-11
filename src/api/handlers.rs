@@ -16,7 +16,7 @@ use crate::state::AppState;
 use crate::x402::models::ResourceInfo;
 use chrono::Utc;
 use http::HeaderMap;
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 use tracing::{info, warn};
 use vercel_runtime::{Body, Response};
 
@@ -53,10 +53,40 @@ async fn maybe_cached(
     endpoint: &str,
     subject: &str,
 ) -> Option<(serde_json::Value, chrono::DateTime<chrono::Utc>)> {
-    let db = state.db.as_deref()?;
+    let Some(db) = state.db.as_deref() else {
+        info!(endpoint, subject, db_present = false, "state_db_absent");
+        info!(endpoint, subject, db_present = false, "cache_read_skipped");
+        return None;
+    };
+    let start = Instant::now();
+    info!(endpoint, subject, db_present = true, "cache_read_start");
     match db.get_cached_score(endpoint, subject).await {
-        Ok(hit) => hit,
+        Ok(Some(hit)) => {
+            info!(
+                endpoint,
+                subject,
+                elapsed_ms = start.elapsed().as_millis(),
+                "cache_read_hit"
+            );
+            Some(hit)
+        }
+        Ok(None) => {
+            info!(
+                endpoint,
+                subject,
+                elapsed_ms = start.elapsed().as_millis(),
+                "cache_read_miss"
+            );
+            None
+        }
         Err(e) => {
+            info!(
+                endpoint,
+                subject,
+                elapsed_ms = start.elapsed().as_millis(),
+                error = %e,
+                "cache_read_error"
+            );
             warn!(
                 endpoint,
                 subject,
@@ -111,11 +141,40 @@ async fn write_cache_and_log(
     auth: &DataAuth,
     signals_json: Option<serde_json::Value>,
 ) {
-    if let Some(db) = state.db.as_deref() {
-        if let Err(e) = db
-            .set_cached_score(endpoint, subject, score, band, body, scoring_version, 300)
-            .await
-        {
+    let Some(db) = state.db.as_deref() else {
+        info!(endpoint, subject, db_present = false, "state_db_absent");
+        info!(endpoint, subject, db_present = false, "cache_write_skipped");
+        info!(
+            endpoint,
+            subject,
+            db_present = false,
+            "scoring_log_write_skipped"
+        );
+        return;
+    };
+
+    let cache_start = Instant::now();
+    info!(endpoint, subject, score, band, "cache_write_start");
+    match db
+        .set_cached_score(endpoint, subject, score, band, body, scoring_version, 300)
+        .await
+    {
+        Ok(_) => {
+            info!(
+                endpoint,
+                subject,
+                elapsed_ms = cache_start.elapsed().as_millis(),
+                "cache_write_ok"
+            );
+        }
+        Err(e) => {
+            info!(
+                endpoint,
+                subject,
+                elapsed_ms = cache_start.elapsed().as_millis(),
+                error = %e,
+                "cache_write_error"
+            );
             warn!(
                 endpoint,
                 subject,
@@ -123,19 +182,41 @@ async fn write_cache_and_log(
                 "score cache write failed"
             );
         }
-        let _ = db
-            .log_scoring(
+    }
+
+    let log_start = Instant::now();
+    info!(endpoint, subject, score, band, "scoring_log_write_start");
+    match db
+        .log_scoring(
+            endpoint,
+            subject,
+            score,
+            band,
+            scoring_version,
+            signals_json,
+            payer_from_auth(auth).as_deref(),
+            None,
+            settlement_sig_from_auth(auth).as_deref(),
+        )
+        .await
+    {
+        Ok(_) => {
+            info!(
                 endpoint,
                 subject,
-                score,
-                band,
-                scoring_version,
-                signals_json,
-                payer_from_auth(auth).as_deref(),
-                None,
-                settlement_sig_from_auth(auth).as_deref(),
-            )
-            .await;
+                elapsed_ms = log_start.elapsed().as_millis(),
+                "scoring_log_write_ok"
+            );
+        }
+        Err(e) => {
+            info!(
+                endpoint,
+                subject,
+                elapsed_ms = log_start.elapsed().as_millis(),
+                error = %e,
+                "scoring_log_write_error"
+            );
+        }
     }
 }
 

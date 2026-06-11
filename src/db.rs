@@ -423,7 +423,7 @@ impl ParametersDb {
             Ok(_) => Ok(()),
             Err(e) => {
                 warn!(error = %e, "scoring log insert failed");
-                Ok(())
+                Err(e)
             }
         }
     }

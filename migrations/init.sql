@@ -9,8 +9,11 @@
 --   Preview/devnet:  parameters-seed-devnet.sql
 --   Mainnet:         parameters-seed-mainnet.sql
 --
+-- Score-cache repair only (destructive): recreate_solrisk_score_cache.sql
+--
 -- Upgrading an existing v0.1 database (legacy parameters, wallet-only cache PK)?
--- See CUTOVER.md — use 002_parameters_v2.sql instead of re-running this file.
+-- Run 002_parameters_v2.sql, then 003_score_cache_pk.sql, then
+-- 004_score_cache_drop_wallet_pubkey.sql — do NOT re-run this file.
 
 -- ============================================================================
 -- parameters (v2 — multi-tenant, per-endpoint pricing)
@@ -92,8 +95,14 @@ CREATE INDEX IF NOT EXISTS idx_solrisk_scam_reports_wallet
     ON solrisk_scam_reports (reported_wallet);
 
 -- ============================================================================
--- solrisk_score_cache — short-lived response cache (5 min TTL, app-enforced)
--- Keyed by (endpoint, subject) for wallet / token / tx routes
+-- solrisk_score_cache — short-lived response cache (app TTL: 300s in set_cached_score)
+--
+-- Keys match src/db.rs and pricing.rs endpoint ids (e.g. endpoint='wallet-risk',
+-- subject=wallet or mint base58). No wallet_pubkey column (legacy v0.1 only).
+--
+-- Repair after legacy upgrade (destructive — wipes cache rows only):
+--   DROP TABLE IF EXISTS solrisk_score_cache;
+--   then run the CREATE TABLE + CREATE INDEX below without IF NOT EXISTS.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS solrisk_score_cache (
     endpoint        TEXT NOT NULL,

@@ -346,6 +346,7 @@ impl ParametersDb {
         })?
         .map_err(|e| Error::Internal(format!("{} delete failed: {}", label, e)))?;
 
+        let ttl: i32 = ttl_secs.clamp(1, 86400) as i32;
         let rows = timeout(
             Self::QUERY_TIMEOUT,
             tx.execute(
@@ -361,7 +362,7 @@ impl ParametersDb {
                     &band,
                     &response,
                     &scoring_version,
-                    &ttl_secs,
+                    &ttl,
                 ],
             ),
         )

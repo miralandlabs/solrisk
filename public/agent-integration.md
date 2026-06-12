@@ -1,78 +1,89 @@
-# solrisk | Wallet Risk Scoring — Agent Integration
+# solrisk v2 — Agent Integration
 
-solrisk is an **x402-enforced resource provider** that answers one question: *"Is this Solana wallet safe to transact with?"*
+solrisk is a **production-ready dual-mode x402 seller** on the `exact` rail for **wallet screening** and **subscription polling**. Pay per call **or** subscribe once and use `Authorization: Bearer` on paid data routes.
 
-## Endpoint
+## What to use in production
 
-```
-GET /api/v1/wallet-risk?wallet=<base58_pubkey>
-```
+| Route | Status | Use for |
+|-------|--------|---------|
+| `GET /api/v1/wallet-risk` | **Production** | Screen wallets before transfer, payout, or custody |
+| `POST /api/v1/subscribe` + Bearer | **Production** | High-volume polling without per-call x402 |
+| `GET /api/v1/token-risk` | **Beta** | Mint authority / holder concentration heuristics only |
+| `GET /api/v1/tx-risk` | **Reserved** | Do **not** integrate — always **501**, not billed |
 
-## Payment
+## Data routes (dual auth)
 
-$0.05 USDC per call via x402 v2. Include `PAYMENT-SIGNATURE` header (raw JSON or base64). Every call requires payment.
+| Route | Query | Per-call (mainnet) |
+|-------|-------|-------------------|
+| `GET /api/v1/wallet-risk` | `wallet=` | $0.05 USDC |
+| `GET /api/v1/token-risk` | `mint=` | $0.10 USDC |
 
-## Response shape (200 OK)
+**Auth (pick one):**
+
+1. `Authorization: Bearer <jwt>` — subscription (no per-call x402)
+2. `PAYMENT-SIGNATURE` — per-call x402 proof
+
+Without either → HTTP **402** with per-endpoint `accepts[]` and `extensions.subscribeUrl`.
+
+## Subscription flow
+
+1. `GET /api/v1/subscribe/info` — tier catalog, `label_coverage`, `persistenceHint`
+2. `POST /api/v1/subscribe?tier=hourly|daily|monthly` without payment → **402 JSON body** (no `Payment-Required` header)
+3. Pay via x402, retry with `PAYMENT-SIGNATURE` → receive JWT
+4. Save token locally until `expiresAt`
+5. Use `Authorization: Bearer <token>` on wallet-risk and token-risk
+
+### Mainnet subscription pricing
+
+| Tier | Price | Window |
+|------|-------|--------|
+| hourly | $1.00 | 1 hour |
+| daily | $5.00 | 24 hours |
+| monthly | $25.00 | 30 days |
+
+## Response envelope (wallet-risk, token-risk)
 
 ```json
 {
-  "wallet": "Ac2ev4ofDx61tuSJCgq9ToSBfVwHD2a1FVJf6p7TAqiB",
-  "risk_score": 18,
-  "risk_band": "LOW",
-  "checked_at": "2026-05-12T04:17:00Z",
-  "signals": {
-    "age_days": 412,
-    "tx_count_30d": 87,
-    "tx_count_total": 1204,
-    "unique_counterparties_30d": 34,
-    "sol_balance_lamports": 218400000,
-    "spl_account_count": 12,
-    "has_activity_48h": true,
-    "program_diversity_30d": 9,
-    "is_fresh_funded": false,
-    "funding_source_risk": "not_checked"
-  },
-  "flags": [],
-  "labels": [],
-  "confidence": 0.82,
-  "scoring_version": "1.0.0"
+  "api_version": 2,
+  "scoring_version": "1.2.0",
+  "recommendation": "ALLOW",
+  "signal_quality": "medium",
+  "cluster": "mainnet",
+  "cache_hit": false,
+  "checked_at": "2026-06-10T12:00:00Z"
 }
 ```
 
-## Risk bands
+| Field | Values | Meaning |
+|-------|--------|---------|
+| `recommendation` | `ALLOW`, `REVIEW`, `BLOCK` | Machine action hint |
+| `cache_hit` | bool | `true` if served from 5-min cache |
+| `cached_at` | ISO8601 | Present when `cache_hit` is true |
+| `cluster` | `mainnet`, `devnet` | From seller `X402_NETWORK` |
 
-| Score | Band | Meaning |
-|---|---|---|
-| 0–24 | `LOW` | Safe to transact at face value |
-| 25–49 | `MEDIUM` | Proceed with caution |
-| 50–74 | `HIGH` | Manual review recommended |
-| 75–100 | `CRITICAL` | Refuse or escalate |
+Wallet `scoring_version` **1.2.0** — unmeasured signals are honest: `signals.unique_counterparties_30d` and `signals.program_diversity_30d` are `null` until derived from parsed transactions (`counterparty_metrics_estimated` tells you which). They are never synthesized from tx counts.
 
-## Error codes
+## Label coverage (free)
+
+`GET /health` and `GET /api/v1/subscribe/info` return `label_coverage` with deny/allow counts.
+
+## Error codes (data routes)
 
 | Code | HTTP | Meaning |
-|---|---|---|
-| `BAD_REQUEST` | 400 | Missing or invalid `wallet` param |
-| `PAYMENT_REQUIREMENTS_UNAVAILABLE` | 503 | Pricing config error |
-| `NOT_IMPLEMENTED` | 501 | Scoring engine not yet deployed (MVP stub) |
+|------|------|---------|
+| `TOKEN_EXPIRED` | 401 | Renew via `/subscribe` |
+| `TOKEN_REVOKED` | 401 | Subscription revoked |
+| `SUBSCRIBER_RATE_LIMIT_EXCEEDED` | 429 | Per-payer fair use |
+| `RATE_LIMIT_EXCEEDED` | 429 | Global per-IP limit |
+| `NOT_IMPLEMENTED` | 501 | tx-risk reserved — ignore in production integrations |
+| `RPC_ERROR` | 503 | Chain data unavailable after retries. Payment settles **before** RPC work (Solana blockhash expiry), so if you paid per-call the 503 includes `settlement_sig` and the `PAYMENT-RESPONSE` header — keep them to reconcile "paid, not served" |
 
-## 402 flow
+## tx-risk
 
-Same as any x402 v2 seller:
-
-1. Call without `PAYMENT-SIGNATURE` → get 402 with `Payment-Required` header (base64 JSON).
-2. Decode `accepts[]`, build tx via pr402 facilitator `/build-exact-payment-tx`.
-3. Sign, then retry with `PAYMENT-SIGNATURE` header.
+Do not call `/api/v1/tx-risk` in production agents. The route exists as a reserved endpoint (501 before auth, no x402 charge) for a future P1 implementation. Wallet screening covers the primary agent use case today.
 
 ## Discovery
 
-- OpenAPI: `/openapi.json`
-- x402 manifest: `/.well-known/x402.json`
-- Health: `/health`
-
-## Limitations (v1)
-
-- Solana only. No cross-chain tracing.
-- Label database is curated and growing; coverage improves over time.
-- `confidence` reflects data coverage, not prediction accuracy.
-- Scores are versioned (`scoring_version`). Re-fetch if you persist them.
+- `GET /.well-known/x402-resources.json` — payable resources (wallet, token, subscribe tiers)
+- `GET /openapi.json` — OpenAPI 0.2.2

@@ -73,6 +73,16 @@ impl Config {
     }
 
     /// Resource URL matching this HTTP request (path + query + inferred absolute origin).
+    /// Cluster label for API responses (`mainnet` vs `devnet`).
+    pub fn cluster_label(&self) -> &'static str {
+        let n = self.x402_network.to_lowercase();
+        if n.contains("devnet") || n.contains("etwtrab") {
+            "devnet"
+        } else {
+            "mainnet"
+        }
+    }
+
     pub fn x402_resource_url_for_request(
         &self,
         headers: &HeaderMap,

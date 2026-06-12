@@ -1,44 +1,58 @@
-# solrisk — Solana Wallet Risk Scoring (x402)
+# solrisk — Solana Risk Scoring (x402 v2)
 
-Pay-per-call wallet risk scoring for Solana, using **HTTP 402** with **x402 v2** payloads and the **pr402** facilitator.
+Dual-mode x402 seller: **per-call** micropayments **and** **subscription JWT** on the same data routes.
 
-## What it does
+**Production status (v0.2.2):** **wallet-risk** and **subscription** are production-ready for buyer agents — curated deny/allow labels (6,900+ / 20+), honest scoring (v1.2.0; unmeasured signals are `null`, never synthesized), and machine-action fields (`recommendation`, `cache_hit`, `cluster`). Payment settles before RPC work (Solana blockhash expiry makes verify→serve→settle unsafe); if scoring then fails, the 503 carries the settlement proof (`PAYMENT-RESPONSE` header + `settlement_sig`) for reconciliation. **token-risk** is **beta** (on-chain mint/holder signals only; LP and deployer depth are P1). **tx-risk** is **reserved** — route returns **501** and is not billed (see below).
 
-One endpoint: `GET /api/v1/wallet-risk?wallet=<base58>`
+## Endpoints
 
-Returns:
-- **risk_score** (0–100)
-- **risk_band** (LOW / MEDIUM / HIGH / CRITICAL)
-- **signals** — chain-derived metrics (age, activity, counterparty diversity, dust patterns, funding source)
-- **flags** — triggered risk indicators
-- **labels** — matches from curated allow/deny lists (OFAC, Chainabuse, internal)
-- **confidence** — data-coverage heuristic (not prediction accuracy)
-- **scoring_version** — versioned formula for reproducibility
+| Route | Status | Auth | Description |
+|-------|--------|------|-------------|
+| `GET /api/v1/wallet-risk?wallet=` | **Production** | Bearer **or** x402 | Wallet screening (scoring v1.2.0) |
+| `GET /api/v1/token-risk?mint=` | **Beta** | Bearer **or** x402 | Token rug-pull heuristics |
+| `GET /api/v1/tx-risk?signature=` | **Reserved** | — | **501** — not a product SKU; planned P1 |
+| `POST /api/v1/subscribe?tier=` | **Production** | x402 only | Issue subscription JWT |
+| `GET /api/v1/subscribe/info` | **Production** | none | Tier catalog + label coverage |
 
-## Pricing
+## Pricing (mainnet seeds)
 
-- **Paid:** $0.05 USDC per call via x402 v2 (`PAYMENT-SIGNATURE` header)
+| SKU | Per-call | Subscribe hourly |
+|-----|----------|------------------|
+| wallet-risk | $0.05 | — |
+| token-risk | $0.10 | — |
+| all routes (bundle) | — | $1.00 / $5.00 daily / $25.00 monthly |
 
-## Architecture
-
-Same stack as `spl-token-balance-serverless`:
-- Rust serverless on Vercel (`vercel-rust`)
-- x402 payment gate (pr402 facilitator verify + settle)
-- Shared Supabase DB (tables prefixed `solrisk_`; `parameters` table shared with `SOLRISK_` param_name prefix)
+Preview uses `migrations/parameters-seed-devnet.sql` (lower subscribe prices).
 
 ## Setup
 
-1. Copy `env.example` to `.env` and fill in values.
-2. Run `migrations/init.sql` against your Supabase DB.
-3. Deploy: `vercel deploy`
+1. Copy `env.example` → `.env` (`X402_*`, `RPC_URL`, `JWT_SECRET` for subscription).
+2. Run `migrations/init.sql` (complete v2 schema).
+3. Seed pricing: `parameters-seed-devnet.sql` or `parameters-seed-mainnet.sql`.
+4. Seed labels: `migrations/labels-seed.sql` (or regenerate via `python3 scripts/build_label_seeds.py`).
+5. `vercel deploy`
 
-## Shared DB discipline
+See [migrations/CUTOVER.md](migrations/CUTOVER.md) and [migrations/LABELS.md](migrations/LABELS.md).
 
-This project shares a Supabase instance with `spl-token-balance-serverless`:
-- **`parameters` table** is shared. solrisk uses `SOLRISK_*` param_name prefix; spl-balance uses `SPL_BALANCE_*`.
-- **All other tables** use `solrisk_` prefix: `solrisk_wallet_labels`, `solrisk_scoring_log`, `solrisk_scam_reports`, `solrisk_score_cache`.
-- **Different seller wallet + vault PDA** — separate row in pr402 `/providers`.
+## tx-risk (reserved, not sunset)
+
+The `/api/v1/tx-risk` route stays in the API as a **reserved namespace** — it returns **501 before auth** so nothing is charged. We keep it (rather than remove the route) because:
+
+- Transaction screening is a distinct buyer workflow from wallet screening (pre-sign transfer review).
+- A stable URL lets agents probe once and cache “not yet available” without a breaking 404 later.
+- Implementation is planned for P1 (`getParsedTransaction`); removing the route would force a version bump when it ships.
+
+If tx-risk is deprioritized entirely, sunset by removing the handler, `vercel.json` route, and OpenAPI path — not before that decision.
+
+## Verify
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --bin risk_api -- -D warnings
+cargo test --lib
+cargo build --bin risk_api
+```
 
 ## x402 Ecosystem
 
-Part of the [x402 ecosystem](https://github.com/miraland-labs/x402). Facilitator: [pr402](https://github.com/miralandlabs/pr402).
+Part of [miraland-labs/x402](https://github.com/miraland-labs/x402). Dual-mode reference alongside [SUBSCRIPTION_PATTERN.md](../SUBSCRIPTION_PATTERN.md).

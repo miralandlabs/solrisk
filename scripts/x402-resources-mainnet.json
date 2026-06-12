@@ -1,0 +1,103 @@
+{
+  "schemaVersion": "0.1.0",
+  "origin": "https://solrisk.signer-payer.me",
+  "merchantWallet": "REPLACE_WITH_MERCHANT_WALLET",
+  "facilitatorHint": "https://ipay.sh",
+  "resources": [
+    {
+      "id": "wallet-risk",
+      "title": "Solana Wallet Risk Score",
+      "description": "Screen a Solana wallet before transfer, payout, or custody: additive risk score (0-100), band, machine-action recommendation (ALLOW/REVIEW/BLOCK), curated deny/allow labels, and raw chain signals. Unmeasured signals are null, never synthesized.",
+      "useCase": "When an agent must decide whether to transact with an unknown wallet.",
+      "category": "risk-scoring",
+      "method": "GET",
+      "resourceUrl": "https://solrisk.signer-payer.me/api/v1/wallet-risk?wallet=11111111111111111111111111111112",
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "agentContract": {
+        "auth": ["PAYMENT-SIGNATURE (x402 v2 per-call)", "Authorization: Bearer <subscription JWT>"],
+        "query": { "required": ["wallet"] },
+        "responseFields": ["risk_score", "risk_band", "recommendation", "signal_quality", "confidence", "labels", "cache_hit", "cluster"],
+        "failureContract": "503 RPC_ERROR after settlement includes settlement_sig + PAYMENT-RESPONSE header for reconciliation",
+        "docs": "GET /agent-integration.md"
+      },
+      "tags": ["solana", "wallet", "risk", "screening", "x402"]
+    },
+    {
+      "id": "token-risk",
+      "title": "Solana Token Rug-Pull Risk Score (Beta)",
+      "description": "Beta: rug-pull heuristics for an SPL mint from on-chain signals only — mint/freeze authority, holder concentration, mint age. LP and deployer depth are planned (P1).",
+      "useCase": "When an agent evaluates a token before swap or listing.",
+      "category": "risk-scoring",
+      "method": "GET",
+      "resourceUrl": "https://solrisk.signer-payer.me/api/v1/token-risk?mint=So11111111111111111111111111111111111111112",
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "agentContract": {
+        "auth": ["PAYMENT-SIGNATURE (x402 v2 per-call)", "Authorization: Bearer <subscription JWT>"],
+        "query": { "required": ["mint"] },
+        "responseFields": ["risk_score", "risk_band", "recommendation", "signal_quality", "confidence", "cache_hit", "cluster"],
+        "failureContract": "503 RPC_ERROR after settlement includes settlement_sig + PAYMENT-RESPONSE header for reconciliation",
+        "docs": "GET /agent-integration.md"
+      },
+      "tags": ["solana", "token", "rug-pull", "risk", "beta"]
+    },
+    {
+      "id": "subscribe-hourly",
+      "title": "solrisk Hourly Subscription",
+      "description": "Pay once via x402, receive a JWT valid 1 hour for unlimited Bearer-auth calls to all solrisk data routes (fair-use rate limited).",
+      "useCase": "Short burst of wallet/token screening without per-call payments.",
+      "category": "subscription",
+      "method": "POST",
+      "resourceUrl": "https://solrisk.signer-payer.me/api/v1/subscribe?tier=hourly",
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "agentContract": {
+        "auth": ["PAYMENT-SIGNATURE (x402 v2)"],
+        "query": { "required": ["tier"] },
+        "responseFields": ["token", "expiresAt", "persistenceHint"],
+        "catalog": "GET /api/v1/subscribe/info",
+        "note": "402 uses JSON body only (no Payment-Required header) on this route"
+      },
+      "tags": ["solana", "subscription", "jwt", "x402"]
+    },
+    {
+      "id": "subscribe-daily",
+      "title": "solrisk Daily Subscription",
+      "description": "Pay once via x402, receive a JWT valid 24 hours for unlimited Bearer-auth calls to all solrisk data routes (fair-use rate limited).",
+      "useCase": "Day-long polling or batch screening without per-call payments.",
+      "category": "subscription",
+      "method": "POST",
+      "resourceUrl": "https://solrisk.signer-payer.me/api/v1/subscribe?tier=daily",
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "agentContract": {
+        "auth": ["PAYMENT-SIGNATURE (x402 v2)"],
+        "query": { "required": ["tier"] },
+        "responseFields": ["token", "expiresAt", "persistenceHint"],
+        "catalog": "GET /api/v1/subscribe/info",
+        "note": "402 uses JSON body only (no Payment-Required header) on this route"
+      },
+      "tags": ["solana", "subscription", "jwt", "x402"]
+    },
+    {
+      "id": "subscribe-monthly",
+      "title": "solrisk Monthly Subscription",
+      "description": "Pay once via x402, receive a JWT valid 30 days for unlimited Bearer-auth calls to all solrisk data routes (fair-use rate limited).",
+      "useCase": "Standing wallet/token screening integration without per-call payments.",
+      "category": "subscription",
+      "method": "POST",
+      "resourceUrl": "https://solrisk.signer-payer.me/api/v1/subscribe?tier=monthly",
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "agentContract": {
+        "auth": ["PAYMENT-SIGNATURE (x402 v2)"],
+        "query": { "required": ["tier"] },
+        "responseFields": ["token", "expiresAt", "persistenceHint"],
+        "catalog": "GET /api/v1/subscribe/info",
+        "note": "402 uses JSON body only (no Payment-Required header) on this route"
+      },
+      "tags": ["solana", "subscription", "jwt", "x402"]
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 use {
     solrisk::{
         api, config::Config, init::init_tracing, route_handler::run_server, state::AppState,
+        well_known,
     },
     std::{future::Future, pin::Pin, sync::Arc},
     vercel_runtime::{Body, Response, StatusCode as VercelStatusCode},
@@ -10,14 +11,24 @@ fn cors_options() -> Response<Body> {
     Response::builder()
         .status(VercelStatusCode::NO_CONTENT)
         .header("Access-Control-Allow-Origin", "*")
-        .header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        .header(
-            "Access-Control-Allow-Headers",
-            "Content-Type, Authorization, PAYMENT-SIGNATURE, X-Correlation-ID",
-        )
+        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        .header("Access-Control-Allow-Headers", api::RISK_CORS_ALLOW_HEADERS)
         .header("Access-Control-Max-Age", "86400")
         .body(Body::Empty)
         .unwrap()
+}
+
+fn base_url_from_headers(headers: &http::HeaderMap) -> String {
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get("host"))
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("solrisk.signer-payer.me");
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("https");
+    format!("{proto}://{host}")
 }
 
 #[tokio::main]
@@ -42,7 +53,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 method
             };
             match (&effective_method, path.as_str()) {
-                // Landing page (HTML or markdown for agents)
                 (&http::Method::GET, "/") => {
                     let accept = headers
                         .get("Accept")
@@ -87,10 +97,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     ))
                     .unwrap(),
 
-                // Main API endpoint
-                (&http::Method::OPTIONS, "/api/v1/wallet-risk") => cors_options(),
+                (&http::Method::GET, "/.well-known/x402-resources.json") => {
+                    let base = base_url_from_headers(&headers);
+                    let manifest = well_known::build_x402_resources(&state, &base).await;
+                    Response::builder()
+                        .status(VercelStatusCode::OK)
+                        .header("Content-Type", "application/json; charset=utf-8")
+                        .body(Body::Text(manifest.to_string()))
+                        .unwrap()
+                }
+
+                (&http::Method::OPTIONS, "/api/v1/wallet-risk")
+                | (&http::Method::OPTIONS, "/api/v1/token-risk")
+                | (&http::Method::OPTIONS, "/api/v1/tx-risk")
+                | (&http::Method::OPTIONS, "/api/v1/subscribe")
+                | (&http::Method::OPTIONS, "/api/v1/subscribe/info") => cors_options(),
+
                 (&http::Method::GET, "/api/v1/wallet-risk") => {
                     api::handle_wallet_risk(&headers, &query, state).await
+                }
+
+                (&http::Method::GET, "/api/v1/token-risk") => {
+                    api::handle_token_risk(&headers, &query, state).await
+                }
+
+                (&http::Method::GET, "/api/v1/tx-risk") => {
+                    api::handle_tx_risk(&headers, &query, state).await
+                }
+
+                (&http::Method::GET, "/api/v1/subscribe/info") => {
+                    api::handle_subscribe_info(state).await
+                }
+
+                (&http::Method::POST, "/api/v1/subscribe") => {
+                    api::handle_subscribe(&headers, &query, state).await
                 }
 
                 _ => Response::builder()

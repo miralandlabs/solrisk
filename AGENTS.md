@@ -4,37 +4,66 @@ This file is for AI agents (Cursor, Claude Code, etc.), not human developers.
 Philosophy: **Simple is Best, yet Elegant.** Make the smallest change that solves
 the task; do not refactor, abstract, or add features that were not asked for.
 
-`solrisk` is a **paid x402 seller**: a Solana wallet risk-scoring API that gates one
-HTTP route with `402 Payment Required` (scheme `exact`) and settles via a pr402
-facilitator. It is a deployed production service — read and extend it, don't grow it
-into a framework.
+`solrisk` v2 is the **canonical open-source x402 seller** on the `exact` rail:
+per-call payment **and** subscription JWT on the same data routes (dual auth).
+
+**Production (v0.2.2):** `wallet-risk` + subscription are buyer-trustworthy (labels, v1.2.0 scoring, `recommendation` envelope). `token-risk` is beta. `tx-risk` returns **501** — reserved route, **not** a paid SKU; do not list it under paid per-call routes.
+
+Settlement-ordering invariants (do not regress):
+
+- **Settle before work** on per-call x402 (Solana blockhash expiry — see `rpc_retry.rs`). Never reorder to verify→serve→settle.
+- **Post-settlement failures carry the settlement proof:** 503 from signal collection must include `PAYMENT-RESPONSE` + `settlement_sig` (`error_response_with_settlement`).
+- **Cache is served only after auth** — cached scores are paid responses (`cache_hit: true`), not a free tier.
+- **Unmeasured signals are `null`, never synthesized** (counterparty/program metrics until parsed-tx support lands).
 
 ## Topology
 
 Single Rust crate (`solrisk`), bin **`risk_api`**, deployed on Vercel (`vercel.json`).
-`data/`, `migrations/` exist but the service runs **stateless by default**; Postgres
-(`DATABASE_URL`) is optional and only stores tunable parameters.
+Postgres (`DATABASE_URL`) is **optional** — env vars always work; DB enables per-endpoint
+pricing, subscriptions, labels, cache, audit log, and rate limits.
 
-The paid endpoint is **`GET /api/v1/wallet-risk?wallet=<pubkey>`**.
+### Paid per-call routes (x402 `PAYMENT-SIGNATURE` or Bearer JWT)
 
-## Hard boundaries (do not cross without explicit human approval)
+| Endpoint key | Route | Status |
+|--------------|-------|--------|
+| `wallet-risk` | `GET /api/v1/wallet-risk?wallet=` | Production |
+| `token-risk` | `GET /api/v1/token-risk?mint=` | Beta |
 
-- **Gate exactly one route** (`GET /api/v1/wallet-risk`, scheme `exact`). Don't add a
-  registry, second paywall, or framework abstractions.
-- **Stay stateless-capable.** Don't make Postgres required; DB is parameters-only.
-- **An unpaid request must answer with HTTP `402`** carrying payment terms — the pr402
-  discovery probe depends on it. The SRM `resourceUrl` carries a sample `?wallet=` so the
-  probe reaches the 402 gate instead of a `400` input error; keep that sample arg.
-- **Env var names are a contract** shared with sibling x402 services: `X402_FACILITATOR_URL`,
-  `X402_PAY_TO`, `X402_NETWORK`, `X402_SCHEME`, `X402_PAYMENT_AMOUNT_USDC`,
-  `X402_PAYMENT_TIMEOUT_SECONDS`, `RPC_URL` (optional `X402_MERCHANT_WALLET`). RPC resilience
-  knobs are `SOLRISK_RPC_*`. Don't rename.
-- **Authoritative payment terms = the live HTTP 402.** `/.well-known/x402-resources.json`
-  (the SRM) is advisory discovery metadata only; its `resourceUrl` host must equal the
-  service origin (origin binding).
-- **No new dependencies** unless asked.
+### Reserved (not billed)
 
-## Verify before claiming done (fix, don't suppress)
+| Route | Behavior |
+|-------|----------|
+| `GET /api/v1/tx-risk?signature=` | **501** before auth — P1 `getParsedTransaction`; keep route for URL stability |
+
+### Subscription routes (x402 gate only here)
+
+| Endpoint key | Route |
+|--------------|-------|
+| `subscribe-hourly` | `POST /api/v1/subscribe?tier=hourly` |
+| `subscribe-daily` | `POST /api/v1/subscribe?tier=daily` |
+| `subscribe-monthly` | `POST /api/v1/subscribe?tier=monthly` |
+
+One JWT covers **all** data routes until `exp`. See [SUBSCRIPTION_PATTERN.md](../SUBSCRIPTION_PATTERN.md).
+
+### Dual auth on data routes
+
+1. `Authorization: Bearer <jwt>` → verify + revocation + per-payer rate limit → score (no x402)
+2. `PAYMENT-SIGNATURE` → per-endpoint x402 gate → score
+3. Neither → HTTP 402 with per-endpoint `accepts[]` (+ subscribe hint)
+
+## Hard boundaries
+
+- **Each paid route maps to one `endpoint` key** in `parameters` (mintforge / spl-balance pattern).
+  No generic payment framework — explicit catalog in `service_endpoints.rs`.
+- **Stay env-capable.** Postgres enhances production; cold start without DB must still serve.
+- **Subscribe 402:** JSON body only (no `Payment-Required` header). **Per-call 402:** keep header for backward compatibility.
+- **Env var contract** unchanged: `X402_FACILITATOR_URL`, `X402_PAY_TO`, `X402_NETWORK`, `X402_SCHEME`,
+  `X402_PAYMENT_AMOUNT_USDC`, `X402_PAYMENT_TIMEOUT_SECONDS`, `RPC_URL`, `JWT_SECRET` (subscription),
+  `RATE_LIMIT_*`, `SOLRISK_RPC_*`.
+- **SRM is advisory;** live 402 body is authoritative. Sample query args on `resourceUrl` for probe-friendly gates.
+- **Approved v2 dependencies:** `jsonwebtoken` (subscription JWT).
+
+## Verify before claiming done
 
 ```bash
 cargo fmt --all -- --check

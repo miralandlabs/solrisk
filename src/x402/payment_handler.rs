@@ -1,7 +1,7 @@
 use {
     crate::{
         error::Error,
-        parameters,
+        parameters, pricing as endpoint_pricing,
         state::AppState,
         x402::{
             facilitator::{parse_payment_proof, FacilitatorClient},
@@ -61,9 +61,12 @@ fn is_sla_scheme(scheme: &str) -> bool {
 }
 
 impl PaymentHandler {
-    /// Free tier when no `SPL_BALANCE_X402_ACCEPTS_JSON` and `X402_PAYMENT_AMOUNT_USDC=0`.
-    async fn payment_skipped(db: Option<&crate::db::ParametersDb>) -> bool {
-        if parameters::resolve_accepts_json(db).await.is_some() {
+    /// Free tier when no accepts JSON and `X402_PAYMENT_AMOUNT_USDC=0`.
+    async fn payment_skipped(db: Option<&crate::db::ParametersDb>, endpoint: &str) -> bool {
+        if parameters::resolve_accepts_json(db, endpoint)
+            .await
+            .is_some()
+        {
             return false;
         }
         matches!(
@@ -76,53 +79,49 @@ impl PaymentHandler {
 
     async fn build_requirement_lines(
         state: &AppState,
+        endpoint: &str,
     ) -> Result<Vec<crate::x402::models::PaymentRequirementsLine>, Error> {
         let db = state.db.as_deref();
         parameters::refresh_parameters_from_db(db).await;
 
-        // Resolve network, pay_to, and scheme from environment (with parameter overrides if DB exists)
-        let network = parameters::resolve_network(db)
+        let network = parameters::resolve_network(db, endpoint)
             .await
             .unwrap_or_else(|| state.config.x402_network.clone());
 
-        let pay_to = parameters::resolve_pay_to(db).await.ok_or_else(|| {
+        let pay_to = parameters::resolve_pay_to(db, endpoint).await.ok_or_else(|| {
             Error::Internal(
                 "X402_PAY_TO not set (exact: SplitVault; sla-escrow: overridden from facilitator discovery when X402_MERCHANT_WALLET is set)"
                     .into(),
             )
         })?;
 
-        let scheme = parameters::resolve_scheme(db)
+        let scheme = parameters::resolve_scheme(db, endpoint)
             .await
             .unwrap_or_else(|| state.config.x402_scheme.clone());
 
-        let timeout = parameters::resolve_timeout_sec(db, state.config.x402_timeout_sec).await;
+        let timeout =
+            parameters::resolve_timeout_sec(db, endpoint, state.config.x402_timeout_sec).await;
 
-        if let Some(raw) = parameters::resolve_accepts_json(db).await {
+        if let Some(raw) = parameters::resolve_accepts_json(db, endpoint).await {
             let specs = pricing::parse_accepts_json(&raw)?;
             let lines =
                 pricing::build_lines_from_specs(&network, &pay_to, &scheme, timeout, &specs)?;
             info!(
+                endpoint = %endpoint,
                 accept_count = lines.len(),
-                json_byte_len = raw.len(),
                 scheme = %scheme,
-                "x402 pricing from SPL_BALANCE_X402_ACCEPTS_JSON"
+                "x402 pricing from X402_ACCEPTS_JSON"
             );
             Ok(lines)
         } else if let Some(u) = state.config.x402_legacy_usdc_amount {
             let lines = pricing::legacy_usdc_line(&network, &pay_to, &scheme, u, timeout)?;
-            info!(
-                legacy_usdc_ui = u,
-                scheme = %scheme,
-                "x402 pricing from X402_PAYMENT_AMOUNT_USDC"
-            );
+            info!(endpoint = %endpoint, legacy_usdc_ui = u, "x402 pricing from env amount");
             Ok(lines)
         } else {
-            let lines = pricing::legacy_usdc_line(&network, &pay_to, &scheme, 0.05, timeout)?;
-            info!(
-                scheme = %scheme,
-                "x402 pricing: default legacy 0.05 USDC"
-            );
+            let default_usdc = endpoint_pricing::default_legacy_usdc(endpoint);
+            let lines =
+                pricing::legacy_usdc_line(&network, &pay_to, &scheme, default_usdc, timeout)?;
+            info!(endpoint = %endpoint, default_usdc, "x402 pricing: endpoint default");
             Ok(lines)
         }
     }
@@ -305,22 +304,41 @@ impl PaymentHandler {
 
     pub async fn get_payment_required(
         state: &AppState,
+        endpoint: &str,
         resource: ResourceInfo,
+        subscribe_hint: bool,
     ) -> Result<PaymentRequired, Error> {
         let db = state.db.as_deref();
-        let merchant_wallet = parameters::resolve_merchant_wallet(db)
+        let merchant_wallet = parameters::resolve_merchant_wallet(db, endpoint)
             .await
             .or_else(|| state.config.x402_merchant_wallet.clone());
 
-        let lines = Self::build_requirement_lines(state).await?;
+        let lines = Self::build_requirement_lines(state, endpoint).await?;
         let accepts =
             Self::enrich_accepts_with_fee_payer(&state.facilitator, merchant_wallet, lines).await?;
+
+        let mut extensions = serde_json::json!({
+            "pr402FacilitatorUrl": state.config.x402_facilitator_url,
+        });
+        if subscribe_hint {
+            if let Some(obj) = extensions.as_object_mut() {
+                obj.insert(
+                    "subscribeUrl".to_string(),
+                    serde_json::Value::String("/api/v1/subscribe".to_string()),
+                );
+                obj.insert(
+                    "subscribeInfoUrl".to_string(),
+                    serde_json::Value::String("/api/v1/subscribe/info".to_string()),
+                );
+            }
+        }
+
         Ok(PaymentRequired {
             x402_version: 2,
             error: None,
             resource,
             accepts,
-            extensions: serde_json::json!({}),
+            extensions,
         })
     }
 
@@ -342,15 +360,24 @@ impl PaymentHandler {
 
     pub async fn check_payment(
         state: &AppState,
+        endpoint: &str,
         headers: &HeaderMap,
         resource: ResourceInfo,
     ) -> Result<Option<SettlementProof>, PaymentGateError> {
-        if Self::payment_skipped(state.db.as_deref()).await {
-            info!("payment skipped (legacy amount 0 and no accepts JSON)");
+        if Self::payment_skipped(state.db.as_deref(), endpoint).await {
+            info!(endpoint = %endpoint, "payment skipped (legacy amount 0 and no accepts JSON)");
             return Ok(None);
         }
 
-        let payment_required = match Self::get_payment_required(state, resource.clone()).await {
+        let subscribe_hint = !endpoint.starts_with("/api/v1/subscribe");
+        let payment_required = match Self::get_payment_required(
+            state,
+            endpoint,
+            resource.clone(),
+            subscribe_hint,
+        )
+        .await
+        {
             Ok(p) => p,
             Err(e) => {
                 warn!("payment config error (paid mode): {}", e);

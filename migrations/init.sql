@@ -1,14 +1,28 @@
--- solrisk: Solana wallet risk scoring service
--- Shares the same Supabase DB as spl-token-balance-serverless.
--- All solrisk-specific tables use `solrisk_` prefix to avoid collision.
--- The shared `parameters` table uses `SOLRISK_` param_name prefix.
+-- solrisk v2 — complete schema (fresh install)
+--
+-- Use this file when provisioning a new database (or solrisk-only Supabase project).
+-- All solrisk-specific tables use the `solrisk_` prefix.
+-- The shared `parameters` table uses (service, endpoint, param_name) — same shape as
+-- spl-token-balance / mintforge.
+--
+-- After this file, run ONE pricing seed:
+--   Preview/devnet:  parameters-seed-devnet.sql
+--   Mainnet:         parameters-seed-mainnet.sql
+--
+-- Score-cache repair (destructive): recreate_solrisk_score_cache.sql
+--   (v2 DDL + RLS policies + grants — do NOT run 003/004 after this)
+--
+-- Legacy v0.1 upgrade only (keep existing cache table, do NOT drop/recreate)?
+--   002_parameters_v2.sql → 003_score_cache_pk.sql → 004_score_cache_drop_wallet_pubkey.sql
+--   → 005_score_cache_rls.sql
 
 -- ============================================================================
--- Shared table: parameters (same schema as spl-token-balance-serverless)
--- If this table already exists from spl-balance, this is a no-op.
+-- parameters (v2 — multi-tenant, per-endpoint pricing)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS parameters (
     id             BIGSERIAL PRIMARY KEY,
+    service        TEXT NOT NULL DEFAULT 'solrisk',
+    endpoint       TEXT NOT NULL DEFAULT '*',
     param_name     TEXT NOT NULL,
     param_value    TEXT NOT NULL,
     inactive       BOOLEAN NOT NULL DEFAULT FALSE,
@@ -18,44 +32,56 @@ CREATE TABLE IF NOT EXISTS parameters (
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_parameters_param_name ON parameters (param_name ASC);
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_parameters_service_endpoint_param
+    ON parameters (service, endpoint, param_name);
+CREATE INDEX IF NOT EXISTS idx_parameters_service_active
+    ON parameters (service, inactive);
 
 -- ============================================================================
--- solrisk-specific tables
--- ============================================================================
-
--- Curated wallet labels (allow/deny). One row per (wallet, source, label).
+-- solrisk_wallet_labels — curated allow/deny labels (DB overrides JSONL)
 -- Sources: 'ofac', 'chainabuse', 'internal', 'jupiter', 'user_report'
+-- weight > 0 = deny penalty; weight < 0 = allow bonus
+-- ============================================================================
 CREATE TABLE IF NOT EXISTS solrisk_wallet_labels (
     wallet_pubkey  TEXT NOT NULL,
     source         TEXT NOT NULL,
     label          TEXT NOT NULL,
     weight         INTEGER NOT NULL DEFAULT 0,
     evidence_url   TEXT,
-    added_at       TIMESTAMPTZ DEFAULT NOW(),
+    added_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (wallet_pubkey, source, label)
 );
 
 CREATE INDEX IF NOT EXISTS idx_solrisk_labels_wallet
     ON solrisk_wallet_labels (wallet_pubkey);
 
--- Audit trail of scored requests (billing reconciliation + model improvement).
+-- ============================================================================
+-- solrisk_scoring_log — audit trail (billing reconciliation + model tuning)
+-- ============================================================================
 CREATE TABLE IF NOT EXISTS solrisk_scoring_log (
     id              BIGSERIAL PRIMARY KEY,
     wallet_pubkey   TEXT NOT NULL,
+    endpoint        TEXT NOT NULL,
+    subject         TEXT NOT NULL,
     score           INTEGER NOT NULL,
     band            TEXT NOT NULL,
     scoring_version TEXT NOT NULL,
     signals_json    JSONB,
     payer           TEXT,
     correlation_id  TEXT,
-    created_at      TIMESTAMPTZ DEFAULT NOW()
+    settlement_sig  TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_solrisk_scoring_log_wallet
-    ON solrisk_scoring_log (wallet_pubkey, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_solrisk_scoring_log_subject
+    ON solrisk_scoring_log (endpoint, subject, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_solrisk_scoring_log_payer
+    ON solrisk_scoring_log (payer, created_at DESC)
+    WHERE payer IS NOT NULL;
 
--- User-submitted scam reports, moderated before promotion to labels.
+-- ============================================================================
+-- solrisk_scam_reports — user-submitted reports (moderated → labels)
+-- ============================================================================
 CREATE TABLE IF NOT EXISTS solrisk_scam_reports (
     id               BIGSERIAL PRIMARY KEY,
     reported_wallet  TEXT NOT NULL,
@@ -63,33 +89,92 @@ CREATE TABLE IF NOT EXISTS solrisk_scam_reports (
     reason           TEXT NOT NULL,
     evidence_url     TEXT,
     status           TEXT NOT NULL DEFAULT 'pending',
-    created_at       TIMESTAMPTZ DEFAULT NOW()
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_solrisk_scam_reports_wallet
     ON solrisk_scam_reports (reported_wallet);
 
--- Short-lived score cache (avoids redundant RPC fan-out for hot wallets).
--- TTL enforced application-side; expired rows cleaned by periodic cron.
+-- ============================================================================
+-- solrisk_score_cache — short-lived response cache (app TTL: 300s in set_cached_score)
+--
+-- Keys match src/db.rs and pricing.rs endpoint ids (e.g. endpoint='wallet-risk',
+-- subject=wallet or mint base58). No wallet_pubkey column (legacy v0.1 only).
+--
+-- Repair after legacy upgrade (destructive — wipes cache rows only):
+--   DROP TABLE IF EXISTS solrisk_score_cache;
+--   then run the CREATE TABLE + CREATE INDEX below without IF NOT EXISTS.
+-- ============================================================================
 CREATE TABLE IF NOT EXISTS solrisk_score_cache (
-    wallet_pubkey   TEXT PRIMARY KEY,
+    endpoint        TEXT NOT NULL,
+    subject         TEXT NOT NULL,
     score           INTEGER NOT NULL,
     band            TEXT NOT NULL,
     response_json   JSONB NOT NULL,
     scoring_version TEXT NOT NULL,
     cached_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at      TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '5 minutes'
+    expires_at      TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '5 minutes',
+    PRIMARY KEY (endpoint, subject)
 );
 
--- Example solrisk parameters (uncomment / adjust):
--- INSERT INTO parameters (param_name, param_value) VALUES
---   ('X402_NETWORK', 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1'),
---   ('X402_PAY_TO', '<YourSolriskVaultPDA>'),
---   ('MERCHANT_WALLET', '<YourSolriskSellerWallet>'),
---   (
---     'X402_ACCEPTS_JSON',
---     '[{"kind":"usdc","amountUi":"0.05"}]'
---   )
--- ON CONFLICT (param_name) DO UPDATE SET
---   param_value = EXCLUDED.param_value,
---   updated_at = NOW();
+CREATE INDEX IF NOT EXISTS idx_solrisk_score_cache_expires
+    ON solrisk_score_cache (expires_at);
+
+ALTER TABLE solrisk_score_cache ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS solrisk_score_cache_service_role_all ON solrisk_score_cache;
+DROP POLICY IF EXISTS solrisk_score_cache_postgres_all ON solrisk_score_cache;
+DROP POLICY IF EXISTS solrisk_score_cache_backend ON solrisk_score_cache;
+
+CREATE POLICY solrisk_score_cache_backend
+    ON solrisk_score_cache
+    FOR ALL
+    USING (current_user NOT IN ('anon', 'authenticated'))
+    WITH CHECK (current_user NOT IN ('anon', 'authenticated'));
+
+CREATE POLICY solrisk_score_cache_service_role_all
+    ON solrisk_score_cache
+    FOR ALL
+    TO service_role
+    USING (true)
+    WITH CHECK (true);
+
+CREATE POLICY solrisk_score_cache_postgres_all
+    ON solrisk_score_cache
+    FOR ALL
+    TO postgres
+    USING (true)
+    WITH CHECK (true);
+
+-- ============================================================================
+-- solrisk_subscriptions — issued JWTs (revocation by payer + issued_at)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS solrisk_subscriptions (
+    id          BIGSERIAL PRIMARY KEY,
+    payer       TEXT NOT NULL,
+    tier        TEXT NOT NULL,
+    issued_at   TIMESTAMPTZ NOT NULL,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    tx_sig      TEXT,
+    revoked     BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_solrisk_subs_payer_issued
+    ON solrisk_subscriptions (payer, issued_at);
+
+-- ============================================================================
+-- solrisk_rate_buckets — serverless-safe per-minute rate limits
+-- bucket_key: 'ip:<addr>' (global) or 'payer:<wallet>' (subscriber fair use)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS solrisk_rate_buckets (
+    bucket_key    TEXT NOT NULL,
+    window_start  TIMESTAMPTZ NOT NULL,
+    count         INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket_key, window_start)
+);
+
+-- ============================================================================
+-- Next step: seed per-endpoint x402 pricing (pick one cluster)
+-- ============================================================================
+-- \i parameters-seed-devnet.sql
+-- \i parameters-seed-mainnet.sql

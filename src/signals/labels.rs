@@ -1,9 +1,11 @@
-//! Static label lookup from compiled-in JSONL files.
-//! No DB required — labels are baked into the binary at compile time.
+//! Wallet label lookup: Postgres TTL cache + compile-time JSONL fallback.
 
+use crate::db::ParametersDb;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant};
+use tracing::warn;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LabelEntry {
@@ -15,7 +17,6 @@ pub struct LabelEntry {
     pub note: String,
 }
 
-/// All labels indexed by wallet pubkey for O(1) lookup.
 pub struct LabelIndex {
     pub by_wallet: HashMap<String, Vec<LabelEntry>>,
 }
@@ -38,23 +39,34 @@ impl LabelIndex {
             .map(|v| v.as_slice())
             .unwrap_or(&[])
     }
-
-    /// Check if any wallet in the given set has a label with positive weight (deny).
-    pub fn any_deny_match(&self, wallets: &[&str]) -> Vec<&LabelEntry> {
-        let mut matches = Vec::new();
-        for w in wallets {
-            for entry in self.lookup(w) {
-                if entry.weight > 0 {
-                    matches.push(entry);
-                }
-            }
-        }
-        matches
-    }
 }
 
-static DENY_INDEX: OnceLock<LabelIndex> = OnceLock::new();
-static ALLOW_INDEX: OnceLock<LabelIndex> = OnceLock::new();
+struct LabelCache {
+    deny: LabelIndex,
+    allow: LabelIndex,
+    last_fetch: Option<Instant>,
+}
+
+static LABEL_CACHE: OnceLock<RwLock<LabelCache>> = OnceLock::new();
+
+fn label_cache() -> &'static RwLock<LabelCache> {
+    LABEL_CACHE.get_or_init(|| {
+        RwLock::new(LabelCache {
+            deny: static_deny_index(),
+            allow: static_allow_index(),
+            last_fetch: None,
+        })
+    })
+}
+
+fn labels_ttl() -> Duration {
+    Duration::from_secs(
+        std::env::var("SOLRISK_LABELS_CACHE_TTL_SEC")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300),
+    )
+}
 
 fn parse_jsonl(raw: &str) -> Vec<LabelEntry> {
     raw.lines()
@@ -63,16 +75,94 @@ fn parse_jsonl(raw: &str) -> Vec<LabelEntry> {
         .collect()
 }
 
-pub fn deny_index() -> &'static LabelIndex {
-    DENY_INDEX.get_or_init(|| {
-        let raw = include_str!("../../data/denylist.jsonl");
-        LabelIndex::build(parse_jsonl(raw))
-    })
+fn static_deny_index() -> LabelIndex {
+    let raw = include_str!("../../data/denylist.jsonl");
+    LabelIndex::build(parse_jsonl(raw))
 }
 
-pub fn allow_index() -> &'static LabelIndex {
-    ALLOW_INDEX.get_or_init(|| {
-        let raw = include_str!("../../data/allowlist.jsonl");
-        LabelIndex::build(parse_jsonl(raw))
-    })
+fn static_allow_index() -> LabelIndex {
+    let raw = include_str!("../../data/allowlist.jsonl");
+    LabelIndex::build(parse_jsonl(raw))
+}
+
+pub async fn refresh_labels_from_db(db: Option<&ParametersDb>) {
+    let Some(db) = db else {
+        return;
+    };
+    let ttl = labels_ttl();
+    if let Ok(r) = label_cache().read() {
+        if let Some(t) = r.last_fetch {
+            if t.elapsed() < ttl {
+                return;
+            }
+        }
+    }
+
+    match db.fetch_wallet_labels().await {
+        Ok(rows) if !rows.is_empty() => {
+            let mut deny = Vec::new();
+            let mut allow = Vec::new();
+            for entry in rows {
+                if entry.weight > 0 {
+                    deny.push(entry);
+                } else {
+                    allow.push(entry);
+                }
+            }
+            if let Ok(mut w) = label_cache().write() {
+                w.deny = LabelIndex::build(deny);
+                w.allow = LabelIndex::build(allow);
+                w.last_fetch = Some(Instant::now());
+            }
+        }
+        Ok(_) => {}
+        Err(e) => warn!(error = %e, "wallet labels DB read failed; using static JSONL"),
+    }
+}
+
+pub fn deny_index() -> LabelIndex {
+    label_cache()
+        .read()
+        .map(|c| LabelIndex {
+            by_wallet: c.deny.by_wallet.clone(),
+        })
+        .unwrap_or_else(|_| static_deny_index())
+}
+
+pub fn allow_index() -> LabelIndex {
+    label_cache()
+        .read()
+        .map(|c| LabelIndex {
+            by_wallet: c.allow.by_wallet.clone(),
+        })
+        .unwrap_or_else(|_| static_allow_index())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LabelCoverage {
+    pub deny_count: usize,
+    pub allow_count: usize,
+    pub sources: Vec<String>,
+    pub last_refresh_hint: &'static str,
+}
+
+pub fn label_coverage() -> LabelCoverage {
+    let deny = deny_index();
+    let allow = allow_index();
+    let mut sources: Vec<String> = deny
+        .by_wallet
+        .values()
+        .flatten()
+        .chain(allow.by_wallet.values().flatten())
+        .map(|e| e.source.clone())
+        .collect();
+    sources.sort();
+    sources.dedup();
+    LabelCoverage {
+        deny_count: deny.by_wallet.len(),
+        allow_count: allow.by_wallet.len(),
+        sources,
+        last_refresh_hint:
+            "JSONL compile-time fallback; DB overrides when DATABASE_URL set (TTL 300s)",
+    }
 }

@@ -2,7 +2,7 @@
 name = "solrisk"
 description = "x402-compliant Solana wallet risk / reputation scoring service"
 repository = "https://github.com/miralandlabs/solrisk.git"
-version = "0.1.0"
+version = "0.2.2"
 edition = "2021"
 
 [[bin]]
@@ -48,6 +48,9 @@ rand = "0.10.0"
 
 # Optional Postgres parameters (pr402-compatible `parameters` table) + solrisk tables
 deadpool-postgres = { version = "0.14", features = ["serde"] }
-tokio-postgres = "0.7"
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1"] }
 postgres-openssl = "0.5"
 openssl = "0.10"
+
+# Subscription JWT (HS256)
+jsonwebtoken = "9"

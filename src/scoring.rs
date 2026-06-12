@@ -1,12 +1,13 @@
-//! Additive risk scoring model.
-//! Score = base(0) + penalties − bonuses, clamped to [0, 100].
-//! All weights are transparent and versioned.
+//! Additive wallet risk scoring model (v1.2).
 
 use crate::signals::chain::ChainSignals;
 use crate::signals::labels::{allow_index, deny_index};
 use serde::Serialize;
 
-pub const SCORING_VERSION: &str = "1.0.0";
+// 1.2.0: counterparty/program metrics are null unless measured (previously
+// synthesized from tx counts). Scoring math unchanged for live traffic —
+// the activity bonus already required `counterparty_metrics_estimated == false`.
+pub const SCORING_VERSION: &str = "1.2.0";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RiskResult {
@@ -16,6 +17,7 @@ pub struct RiskResult {
     pub flags: Vec<String>,
     pub labels: Vec<LabelMatch>,
     pub confidence: f32,
+    pub signal_quality: &'static str,
     pub scoring_version: &'static str,
 }
 
@@ -26,36 +28,45 @@ pub struct LabelMatch {
     pub weight: i32,
 }
 
-/// Compute the risk score from chain signals + label lookups.
+/// Machine-readable action for agents: BLOCK on deny labels or CRITICAL band.
+pub fn recommendation_from(band: &str, has_deny_label: bool, signal_quality: &str) -> &'static str {
+    if has_deny_label || band == "CRITICAL" {
+        "BLOCK"
+    } else if band == "HIGH" || band == "MEDIUM" || signal_quality == "low" {
+        "REVIEW"
+    } else {
+        "ALLOW"
+    }
+}
+
 pub fn score_wallet(wallet: &str, signals: &ChainSignals) -> RiskResult {
     let mut score: i32 = 0;
     let mut flags: Vec<String> = Vec::new();
     let mut label_matches: Vec<LabelMatch> = Vec::new();
 
-    // --- Penalties (positive weight = increases risk) ---
-
-    // Freshness penalty: funded <24h ago AND <5 tx
     if signals.is_fresh_funded {
         score += 25;
         flags.push("FRESH_FUNDED".to_string());
     }
 
-    // Low activity penalty: very few tx in 30d for an old wallet
     if signals.age_days > 30 && signals.tx_count_30d < 3 {
         score += 10;
         flags.push("DORMANT".to_string());
     }
 
-    // Dust farming: high tx count but very low SOL balance
     if signals.tx_count_30d > 50 && signals.sol_balance_lamports < 10_000_000 {
-        // 50+ tx in 30d but <0.01 SOL
         score += 15;
         flags.push("DUST_PATTERN".to_string());
     }
 
-    // Deny-list matches (OFAC, mixer, drainer, scam)
-    let deny_hits = deny_index().lookup(wallet);
-    for entry in deny_hits {
+    if signals.funding_source_risk == "fresh_unknown" {
+        score += 10;
+        flags.push("FUNDING_UNTRACED".to_string());
+    }
+
+    let deny_idx = deny_index();
+    let deny_hits: Vec<_> = deny_idx.lookup(wallet).to_vec();
+    for entry in &deny_hits {
         score += entry.weight;
         flags.push(format!("LABEL:{}", entry.label.to_uppercase()));
         label_matches.push(LabelMatch {
@@ -65,23 +76,22 @@ pub fn score_wallet(wallet: &str, signals: &ChainSignals) -> RiskResult {
         });
     }
 
-    // --- Bonuses (negative weight = decreases risk) ---
-
-    // Age bonus: log-scaled, max -15
     if signals.age_days > 0 {
         let age_bonus = ((signals.age_days as f64).ln() * 3.0).min(15.0) as i32;
         score -= age_bonus;
     }
 
-    // Activity bonus: healthy cadence with diversity
-    if signals.tx_count_30d >= 10 && signals.unique_counterparties_30d >= 5 {
+    if !signals.counterparty_metrics_estimated
+        && signals.tx_count_30d >= 10
+        && signals.unique_counterparties_30d.unwrap_or(0) >= 5
+    {
         score -= 10;
     }
 
-    // Verified label bonus
-    let allow_hits = allow_index().lookup(wallet);
-    for entry in allow_hits {
-        score += entry.weight; // weight is negative for allow entries
+    let allow_idx = allow_index();
+    let allow_hits: Vec<_> = allow_idx.lookup(wallet).to_vec();
+    for entry in &allow_hits {
+        score += entry.weight;
         label_matches.push(LabelMatch {
             source: entry.source.clone(),
             label: entry.label.clone(),
@@ -89,7 +99,6 @@ pub fn score_wallet(wallet: &str, signals: &ChainSignals) -> RiskResult {
         });
     }
 
-    // --- Clamp and classify ---
     let final_score = score.clamp(0, 100) as u8;
     let band = match final_score {
         0..=24 => "LOW",
@@ -98,8 +107,8 @@ pub fn score_wallet(wallet: &str, signals: &ChainSignals) -> RiskResult {
         _ => "CRITICAL",
     };
 
-    // Confidence: reflects data coverage
-    let confidence = compute_confidence(signals);
+    let signal_quality = compute_signal_quality(signals);
+    let confidence = compute_confidence(signals, signal_quality);
 
     RiskResult {
         risk_score: final_score,
@@ -108,35 +117,44 @@ pub fn score_wallet(wallet: &str, signals: &ChainSignals) -> RiskResult {
         flags,
         labels: label_matches,
         confidence,
+        signal_quality,
         scoring_version: SCORING_VERSION,
     }
 }
 
-/// Confidence heuristic: how much data we had to work with.
-/// Low tx count or very new wallet = lower confidence.
-fn compute_confidence(signals: &ChainSignals) -> f32 {
-    let mut conf: f32 = 0.5; // base
+fn compute_signal_quality(signals: &ChainSignals) -> &'static str {
+    if signals.tx_count_total < 5 || signals.sig_pages_fetched < 2 {
+        "low"
+    } else if signals.counterparty_metrics_estimated {
+        "medium"
+    } else {
+        "high"
+    }
+}
 
-    // More tx history = more confidence
+fn compute_confidence(signals: &ChainSignals, signal_quality: &str) -> f32 {
+    let mut conf: f32 = match signal_quality {
+        "high" => 0.65,
+        "medium" => 0.55,
+        _ => 0.45,
+    };
+
     if signals.tx_count_total >= 50 {
         conf += 0.2;
     } else if signals.tx_count_total >= 10 {
         conf += 0.1;
     }
 
-    // Older wallet = more confidence
     if signals.age_days >= 90 {
         conf += 0.15;
     } else if signals.age_days >= 7 {
         conf += 0.05;
     }
 
-    // Has recent activity = more confidence
     if signals.has_activity_48h {
         conf += 0.05;
     }
 
-    // Has SPL accounts = richer signal
     if signals.spl_account_count >= 3 {
         conf += 0.05;
     }
@@ -153,15 +171,17 @@ mod tests {
             age_days: 200,
             tx_count_total: 100,
             tx_count_30d: 30,
-            unique_counterparties_30d: 15,
+            unique_counterparties_30d: Some(15),
             sol_balance_lamports: 500_000_000,
             spl_account_count: 5,
             has_activity_48h: true,
-            program_diversity_30d: 8,
+            program_diversity_30d: Some(8),
             is_fresh_funded: false,
-            funding_source_risk: "not_checked".to_string(),
+            funding_source_risk: "untraced".to_string(),
             first_seen_ts: 1700000000,
             latest_tx_ts: 1715000000,
+            counterparty_metrics_estimated: true,
+            sig_pages_fetched: 3,
         }
     }
 
@@ -173,7 +193,26 @@ mod tests {
         );
         assert!(result.risk_score <= 24, "score={}", result.risk_score);
         assert_eq!(result.risk_band, "LOW");
-        assert!(result.confidence >= 0.8);
+        assert_eq!(result.scoring_version, SCORING_VERSION);
+    }
+
+    #[test]
+    fn activity_bonus_skipped_when_counterparties_estimated() {
+        let mut signals = base_signals();
+        signals.is_fresh_funded = true;
+        signals.funding_source_risk = "fresh_unknown".to_string();
+        assert!(signals.counterparty_metrics_estimated);
+        let wallet = "SomeHealthyWallet111111111111111111111111111";
+        let estimated = score_wallet(wallet, &signals);
+        let mut with_real = signals.clone();
+        with_real.counterparty_metrics_estimated = false;
+        let real = score_wallet(wallet, &with_real);
+        assert!(
+            real.risk_score < estimated.risk_score,
+            "estimated={} real={}",
+            estimated.risk_score,
+            real.risk_score
+        );
     }
 
     #[test]
@@ -183,7 +222,7 @@ mod tests {
         signals.age_days = 0;
         signals.tx_count_total = 2;
         signals.tx_count_30d = 2;
-        signals.unique_counterparties_30d = 1;
+        signals.unique_counterparties_30d = Some(1);
         let result = score_wallet("FreshWallet1111111111111111111111111111111111", &signals);
         assert!(result.risk_score >= 25, "score={}", result.risk_score);
         assert!(result.flags.contains(&"FRESH_FUNDED".to_string()));
@@ -191,7 +230,6 @@ mod tests {
 
     #[test]
     fn sanctioned_wallet_scores_critical() {
-        // Use a wallet from our denylist
         let result = score_wallet(
             "WSSoJFMBEKBbAMwRqnMfjt1urtsFGBTMqjsqbBpVMpC",
             &base_signals(),
@@ -201,9 +239,37 @@ mod tests {
     }
 
     #[test]
+    fn sanctioned_wallet_recommendation_block() {
+        let result = score_wallet(
+            "WSSoJFMBEKBbAMwRqnMfjt1urtsFGBTMqjsqbBpVMpC",
+            &base_signals(),
+        );
+        let has_deny = result.labels.iter().any(|l| l.weight > 0);
+        assert!(has_deny);
+        assert_eq!(
+            recommendation_from(result.risk_band, has_deny, result.signal_quality),
+            "BLOCK"
+        );
+    }
+
+    #[test]
+    fn clean_wallet_recommendation_allow() {
+        let result = score_wallet(
+            "SomeHealthyWallet111111111111111111111111111",
+            &base_signals(),
+        );
+        let has_deny = result.labels.iter().any(|l| l.weight > 0);
+        assert_eq!(
+            recommendation_from(result.risk_band, has_deny, result.signal_quality),
+            "ALLOW"
+        );
+    }
+
+    #[test]
     fn confidence_low_for_empty_wallet() {
         let signals = ChainSignals::default();
         let result = score_wallet("EmptyWallet11111111111111111111111111111111111", &signals);
         assert!(result.confidence <= 0.6);
+        assert_eq!(result.signal_quality, "low");
     }
 }

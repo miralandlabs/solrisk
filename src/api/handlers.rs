@@ -16,19 +16,47 @@ use crate::state::AppState;
 use crate::x402::models::ResourceInfo;
 use chrono::Utc;
 use http::HeaderMap;
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, OnceLock, RwLock},
+    time::{Duration, Instant},
+};
 use tracing::{info, warn};
 use vercel_runtime::{Body, Response};
 
 pub use crate::api::common::RISK_CORS_ALLOW_HEADERS;
 
-pub async fn handle_health(state: Arc<AppState>) -> Response<Body> {
-    let db_ok = if let Some(db) = state.db.as_ref() {
-        db.fetch_parameters_map().await.is_ok()
-    } else {
-        false
+const DB_HEALTH_TTL: Duration = Duration::from_secs(30);
+
+struct DbHealthCache {
+    ok: bool,
+    checked_at: Instant,
+}
+
+static DB_HEALTH: OnceLock<RwLock<Option<DbHealthCache>>> = OnceLock::new();
+
+async fn db_connected(state: &AppState) -> bool {
+    let Some(db) = state.db.as_ref() else {
+        return false;
     };
-    labels::refresh_labels_from_db(state.db.as_deref()).await;
+    if let Ok(guard) = DB_HEALTH.get_or_init(|| RwLock::new(None)).read() {
+        if let Some(cache) = guard.as_ref() {
+            if cache.checked_at.elapsed() < DB_HEALTH_TTL {
+                return cache.ok;
+            }
+        }
+    }
+    let ok = db.ping().await.is_ok();
+    if let Ok(mut guard) = DB_HEALTH.get_or_init(|| RwLock::new(None)).write() {
+        *guard = Some(DbHealthCache {
+            ok,
+            checked_at: Instant::now(),
+        });
+    }
+    ok
+}
+
+pub async fn handle_health(state: Arc<AppState>) -> Response<Body> {
+    let db_ok = db_connected(&state).await;
     let coverage = labels::label_coverage();
     let body = serde_json::json!({
         "status": "ok",

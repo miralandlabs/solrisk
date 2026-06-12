@@ -88,7 +88,28 @@ impl ParametersDb {
             .map_err(|e| Error::Internal(format!("db pool: {}", e)))
     }
 
-    /// Flat map for health check / legacy readers.
+    /// Lightweight liveness probe for `/health` (no transaction wrapper).
+    pub async fn ping(&self) -> Result<(), Error> {
+        const PING_TIMEOUT: Duration = Duration::from_secs(8);
+        let client = self.conn().await?;
+        let label = "health ping";
+        match timeout(PING_TIMEOUT, client.simple_query("SELECT 1")).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => {
+                Self::discard_client(client, label, "ping failed");
+                Err(Error::Internal(format!("{} failed: {}", label, e)))
+            }
+            Err(_) => {
+                Self::discard_client(client, label, "ping timed out");
+                Err(Error::Internal(format!(
+                    "{} timed out after {:?}",
+                    label, PING_TIMEOUT
+                )))
+            }
+        }
+    }
+
+    /// Flat map for legacy readers.
     pub async fn fetch_parameters_map(&self) -> Result<HashMap<String, String>, Error> {
         let rows = self.fetch_service_parameters(SERVICE).await?;
         let mut map = HashMap::new();

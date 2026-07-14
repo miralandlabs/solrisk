@@ -2,7 +2,7 @@
 
 Dual-mode x402 seller: **per-call** micropayments **and** **subscription JWT** on the same data routes.
 
-**Production status (v0.2.2):** **wallet-risk** and **subscription** are production-ready for buyer agents — curated deny/allow labels (6,900+ / 20+), honest scoring (v1.2.0; unmeasured signals are `null`, never synthesized), and machine-action fields (`recommendation`, `cache_hit`, `cluster`). Payment settles before RPC work (Solana blockhash expiry makes verify→serve→settle unsafe); if scoring then fails, the 503 carries the settlement proof (`PAYMENT-RESPONSE` header + `settlement_sig`) for reconciliation. **token-risk** is **beta** (on-chain mint/holder signals only; LP and deployer depth are P1). **tx-risk** is **reserved** — route returns **501** and is not billed (see below).
+**Production status (v0.3.0):** **wallet-risk** and **subscription** are production-ready for buyer agents — curated deny/allow labels (6,900+ / 20+), honest scoring (v1.2.0; unmeasured signals are `null`, never synthesized), and machine-action fields (`recommendation`, `cache_hit`, `cluster`). Payment settles before RPC work (Solana blockhash expiry makes verify→serve→settle unsafe); if scoring then fails, the 503 carries the settlement proof (`PAYMENT-RESPONSE` header + `settlement_sig`) for reconciliation. **tx-risk** is now a **live SKU** — **pre-sign transaction screening**: an agent submits a base64 unsigned transaction and gets a `SIGN / REVIEW / BLOCK` verdict *before signing*. v1 is deterministic static instruction analysis (no RPC), so once the tx decodes the verdict never depends on a round-trip; balance-delta drain detection via `simulateTransaction` is the next slice. **token-risk** is **beta** (on-chain mint/holder signals only; LP and deployer depth are P1). See [docs/ENHANCEMENT_PLAN.md](docs/ENHANCEMENT_PLAN.md) for the roadmap.
 
 ## Endpoints
 
@@ -10,7 +10,7 @@ Dual-mode x402 seller: **per-call** micropayments **and** **subscription JWT** o
 |-------|--------|------|-------------|
 | `GET /api/v1/wallet-risk?wallet=` | **Production** | Bearer **or** x402 | Wallet screening (scoring v1.2.0) |
 | `GET /api/v1/token-risk?mint=` | **Beta** | Bearer **or** x402 | Token rug-pull heuristics |
-| `GET /api/v1/tx-risk?signature=` | **Reserved** | — | **501** — not a product SKU; planned P1 |
+| `GET /api/v1/tx-risk?transaction=[&owner=]` | **Production** | Bearer **or** x402 | Pre-sign screening → `SIGN`/`REVIEW`/`BLOCK` (scoring v2.0.0) |
 | `POST /api/v1/subscribe?tier=` | **Production** | x402 only | Issue subscription JWT |
 | `GET /api/v1/subscribe/info` | **Production** | none | Tier catalog + label coverage |
 
@@ -20,6 +20,7 @@ Dual-mode x402 seller: **per-call** micropayments **and** **subscription JWT** o
 |-----|----------|------------------|
 | wallet-risk | $0.05 | — |
 | token-risk | $0.10 | — |
+| tx-risk (pre-sign) | $0.25 | — |
 | all routes (bundle) | — | $1.00 / $5.00 daily / $25.00 monthly |
 
 Preview uses `migrations/parameters-seed-devnet.sql` (lower subscribe prices).
@@ -34,15 +35,29 @@ Preview uses `migrations/parameters-seed-devnet.sql` (lower subscribe prices).
 
 See [migrations/CUTOVER.md](migrations/CUTOVER.md) and [migrations/LABELS.md](migrations/LABELS.md).
 
-## tx-risk (reserved, not sunset)
+## tx-risk (pre-sign screening)
 
-The `/api/v1/tx-risk` route stays in the API as a **reserved namespace** — it returns **501 before auth** so nothing is charged. We keep it (rather than remove the route) because:
+`GET /api/v1/tx-risk?transaction=<base64 unsigned tx>[&owner=<pubkey>]` returns a
+`SIGN / REVIEW / BLOCK` verdict for a transaction **before** the agent signs it — the
+highest-value pre-flight decision in the agentic economy ("should I sign this?").
 
-- Transaction screening is a distinct buyer workflow from wallet screening (pre-sign transfer review).
-- A stable URL lets agents probe once and cache “not yet available” without a breaking 404 later.
-- Implementation is planned for P1 (`getParsedTransaction`); removing the route would force a version bump when it ships.
+**v1 (deterministic, no RPC).** The static instruction decode flags:
 
-If tx-risk is deprioritized entirely, sunset by removing the handler, `vercel.json` route, and OpenAPI path — not before that decision.
+- **`BLOCK`** — a program on the **deny list** (known drainer/scam), or an SPL Token
+  **`SetAuthority`** handoff (owner/close/mint/freeze authority change).
+- **`REVIEW`** — SPL Token **`Approve`** delegation, **`CloseAccount`**, an **unlabeled
+  program**, or a v0 tx that hides programs behind an **address lookup table** (reduced
+  static visibility — never assumed safe).
+- **`SIGN`** — only well-known, benign programs (System / Token / ATA / ComputeBudget / Memo).
+
+Because v1 is pure-CPU, the verdict is deterministic once the tx decodes — it never
+depends on an RPC round-trip. Subject defaults to the fee payer; override with `owner`.
+
+**Contract notes.** A non-base64 `transaction` is rejected **before** payment (`400`). A
+paid request whose input is valid base64 but not a decodable transaction returns `422`
+**with** the settlement proof for reconciliation. Balance-delta drain detection via
+`simulateTransaction` is the documented v1.1 slice — see
+[docs/ENHANCEMENT_PLAN.md](docs/ENHANCEMENT_PLAN.md).
 
 ## Verify
 

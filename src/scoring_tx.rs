@@ -1,20 +1,23 @@
-//! Transaction risk scoring (v1.0 stub — signature presence + age).
+//! Transaction risk verdict (v2.0 — static pre-sign instruction screening).
+//!
+//! Consumes the decoded signals from [`crate::signals::tx`] and renders a
+//! `SIGN / REVIEW / BLOCK` recommendation. BLOCK is reserved for direct control/asset
+//! handoffs (authority change, known-bad program); REVIEW covers risky-but-sometimes-
+//! legitimate actions (delegation, account close) and reduced visibility (lookup tables,
+//! unlabeled programs). Nothing here fabricates a signal it did not observe.
 
+use crate::signals::tx::TxSignals;
 use serde::Serialize;
 
-pub const SCORING_VERSION: &str = "1.0.0";
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TxSignals {
-    pub signature_len: usize,
-    pub parsed: bool,
-}
+pub const SCORING_VERSION: &str = "2.0.0";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TxRiskResult {
     pub risk_score: u8,
     pub risk_band: &'static str,
     pub risk_domain: &'static str,
+    /// Machine action for agents: `SIGN` / `REVIEW` / `BLOCK`.
+    pub recommendation: &'static str,
     pub signals: TxSignals,
     pub flags: Vec<String>,
     pub confidence: f32,
@@ -22,13 +25,39 @@ pub struct TxRiskResult {
     pub scoring_version: &'static str,
 }
 
-pub fn score_tx(signature: &str) -> TxRiskResult {
+pub fn score_tx(signals: &TxSignals) -> TxRiskResult {
     let mut score: i32 = 0;
-    let mut flags = Vec::new();
+    let mut flags: Vec<String> = Vec::new();
 
-    if signature.len() < 80 || signature.len() > 100 {
-        score += 40;
-        flags.push("INVALID_SIGNATURE_FORMAT".to_string());
+    // BLOCK-tier: direct control/asset handoff or a known-bad program.
+    for hit in &signals.deny_program_hits {
+        score += 60;
+        flags.push(format!("DENY_PROGRAM:{}", hit.label.to_uppercase()));
+    }
+    for a in &signals.authority_handoffs {
+        score += 60;
+        flags.push(format!("AUTHORITY_HANDOFF:{a}"));
+    }
+
+    // REVIEW-tier: risky-but-sometimes-legitimate, or reduced visibility.
+    if signals.delegations > 0 {
+        score += 30;
+        flags.push(format!("TOKEN_DELEGATION:{}", signals.delegations));
+    }
+    if signals.close_accounts > 0 {
+        score += 20;
+        flags.push(format!("CLOSE_ACCOUNT:{}", signals.close_accounts));
+    }
+    if signals.uses_lookup_tables {
+        score += 15;
+        flags.push("USES_LOOKUP_TABLES".to_string());
+    }
+    if !signals.unknown_programs.is_empty() {
+        score += 15;
+        flags.push(format!(
+            "UNKNOWN_PROGRAMS:{}",
+            signals.unknown_programs.len()
+        ));
     }
 
     let final_score = score.clamp(0, 100) as u8;
@@ -39,17 +68,122 @@ pub fn score_tx(signature: &str) -> TxRiskResult {
         _ => "CRITICAL",
     };
 
+    let has_block = !signals.deny_program_hits.is_empty() || !signals.authority_handoffs.is_empty();
+    let has_review = signals.delegations > 0
+        || signals.close_accounts > 0
+        || signals.uses_lookup_tables
+        || !signals.unknown_programs.is_empty();
+    let recommendation = if has_block {
+        "BLOCK"
+    } else if has_review {
+        "REVIEW"
+    } else {
+        "SIGN"
+    };
+
+    // Full static visibility unless programs hide behind a lookup table (or there were
+    // no instructions to inspect).
+    let signal_quality = if signals.instruction_count == 0 {
+        "low"
+    } else if signals.uses_lookup_tables {
+        "medium"
+    } else {
+        "high"
+    };
+    let confidence = match signal_quality {
+        "high" => 0.85,
+        "medium" => 0.60,
+        _ => 0.40,
+    };
+
     TxRiskResult {
         risk_score: final_score,
         risk_band: band,
-        risk_domain: "tx",
-        signals: TxSignals {
-            signature_len: signature.len(),
-            parsed: false,
-        },
+        risk_domain: "transaction",
+        recommendation,
+        signals: signals.clone(),
         flags,
-        confidence: 0.4,
-        signal_quality: "low",
+        confidence,
+        signal_quality,
         scoring_version: SCORING_VERSION,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signals::tx::{TxLabelHit, TxSignals};
+
+    fn clean() -> TxSignals {
+        TxSignals {
+            fee_payer: Some("Payer1111111111111111111111111111111111111".into()),
+            subject: Some("Payer1111111111111111111111111111111111111".into()),
+            instruction_count: 2,
+            programs: vec!["11111111111111111111111111111111".into()],
+            uses_lookup_tables: false,
+            simulated: false,
+            deny_program_hits: vec![],
+            authority_handoffs: vec![],
+            delegations: 0,
+            close_accounts: 0,
+            unknown_programs: vec![],
+        }
+    }
+
+    #[test]
+    fn clean_transfer_signs() {
+        let r = score_tx(&clean());
+        assert_eq!(r.recommendation, "SIGN");
+        assert_eq!(r.risk_band, "LOW");
+        assert_eq!(r.signal_quality, "high");
+    }
+
+    #[test]
+    fn authority_handoff_blocks() {
+        let mut s = clean();
+        s.authority_handoffs.push("AccountOwner".into());
+        let r = score_tx(&s);
+        assert_eq!(r.recommendation, "BLOCK");
+        assert!(r.risk_score >= 50);
+        assert!(r.flags.iter().any(|f| f.contains("AUTHORITY_HANDOFF")));
+    }
+
+    #[test]
+    fn deny_program_blocks() {
+        let mut s = clean();
+        s.deny_program_hits.push(TxLabelHit {
+            program: "BadProg1111111111111111111111111111111111111".into(),
+            source: "test".into(),
+            label: "drainer".into(),
+        });
+        let r = score_tx(&s);
+        assert_eq!(r.recommendation, "BLOCK");
+        assert!(r.flags.iter().any(|f| f.contains("DENY_PROGRAM")));
+    }
+
+    #[test]
+    fn delegation_reviews() {
+        let mut s = clean();
+        s.delegations = 1;
+        let r = score_tx(&s);
+        assert_eq!(r.recommendation, "REVIEW");
+    }
+
+    #[test]
+    fn lookup_tables_reduce_visibility_and_review() {
+        let mut s = clean();
+        s.uses_lookup_tables = true;
+        let r = score_tx(&s);
+        assert_eq!(r.recommendation, "REVIEW");
+        assert_eq!(r.signal_quality, "medium");
+    }
+
+    #[test]
+    fn unknown_program_reviews() {
+        let mut s = clean();
+        s.unknown_programs
+            .push("Unknown11111111111111111111111111111111111".into());
+        let r = score_tx(&s);
+        assert_eq!(r.recommendation, "REVIEW");
     }
 }

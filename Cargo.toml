@@ -2,7 +2,7 @@
 name = "solrisk"
 description = "x402-compliant Solana wallet risk / reputation scoring service"
 repository = "https://github.com/miralandlabs/solrisk.git"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 
 [[bin]]

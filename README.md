@@ -8,7 +8,7 @@ Dual-mode x402 seller: **per-call** micropayments **and** **subscription JWT** o
 
 | Route | Status | Auth | Description |
 |-------|--------|------|-------------|
-| `GET /api/v1/wallet-risk?wallet=` | **Production** | Bearer **or** x402 | Wallet screening (scoring v1.2.0) |
+| `GET /api/v1/wallet-risk?wallet=` | **Production** | Bearer **or** x402 | Wallet screening + real fund-flow trace & counterparty exposure (scoring v1.3.0) |
 | `GET /api/v1/token-risk?mint=` | **Beta** | Bearer **or** x402 | Token rug-pull heuristics |
 | `GET /api/v1/tx-risk?transaction=[&owner=]` | **Production** | Bearer **or** x402 | Pre-sign screening → `SIGN`/`REVIEW`/`BLOCK` (scoring v2.0.0) |
 | `POST /api/v1/subscribe?tier=` | **Production** | x402 only | Issue subscription JWT |

@@ -46,9 +46,14 @@ nothing**. This is the AML moat. **Lifts wallet-risk → $0.25.**
   heuristic: `no_history` | `partial_history` | `genesis_untraceable` | `labeled_bad` |
   `traced_clean`; a deny-labeled funder adds `FUNDED_BY_LABELED`. Honest: partial history or
   an unmappable (lookup-table) genesis is reported, never guessed.
-- **P1.1 — multi-hop:** walk 2–3 hops back and label-check each.
-- **P1.2 — counterparty exposure:** parse recent txns for `% inflow from labeled-bad` and
-  real `unique_counterparties_30d` (still `null` today).
+- **P1.2 — counterparty exposure (shipped, v0.3.0):** parses a bounded window of recent
+  (30d) txns (env `SOLRISK_MAX_TX_PARSE`, default 20) for real `unique_counterparties_30d`
+  + `program_diversity_30d` (no longer `null`) and deny-labeled counterparty exposure
+  (`COUNTERPARTY_LABELED` +30 — "who does this wallet deal with"). Best-effort; a tx that
+  can't be mapped (lookup tables) is skipped, not guessed. Scoring → v1.3.0.
+- **P1.1 — multi-hop:** walk 2–3 hops back from the funder and label-check each.
+- **Follow-ups:** parallelize the P1.2 getTransaction fan-out (currently sequential,
+  bounded); Token-2022 in the tx-risk sim; `% inflow from labeled-bad` weighting.
 
 ### P2 — complete `token-risk` rug depth
 Add LP pool discovery + **lock/burn** status + depth-vs-mcap; **deployer history** (serial-rugger

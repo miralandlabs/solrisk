@@ -1,13 +1,13 @@
-//! Additive wallet risk scoring model (v1.2).
+//! Additive wallet risk scoring model (v1.3 — fund-flow + counterparty AML signals).
 
 use crate::signals::chain::ChainSignals;
 use crate::signals::labels::{allow_index, deny_index};
 use serde::Serialize;
 
-// 1.2.0: counterparty/program metrics are null unless measured (previously
-// synthesized from tx counts). Scoring math unchanged for live traffic —
-// the activity bonus already required `counterparty_metrics_estimated == false`.
-pub const SCORING_VERSION: &str = "1.2.0";
+// 1.3.0: real fund-flow provenance (P1: `FUNDED_BY_LABELED` / `FUNDING_UNTRACED`) and
+// recent-counterparty exposure (P1.2: `COUNTERPARTY_LABELED` + measured
+// `unique_counterparties_30d`). 1.2.0: counterparty/program metrics null unless measured.
+pub const SCORING_VERSION: &str = "1.3.0";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RiskResult {
@@ -73,6 +73,16 @@ pub fn score_wallet(wallet: &str, signals: &ChainSignals) -> RiskResult {
     ) {
         score += 5;
         flags.push("FUNDING_UNTRACED".to_string());
+    }
+
+    // P1.2 fund-flow: recent transactions with deny-labeled counterparties (mixer /
+    // sanctioned / drainer) — the "who does this wallet deal with" AML signal.
+    if !signals.counterparty_labels.is_empty() {
+        score += 30;
+        flags.push(format!(
+            "COUNTERPARTY_LABELED:{}",
+            signals.counterparty_labels.len()
+        ));
     }
 
     let deny_idx = deny_index();
@@ -191,6 +201,7 @@ mod tests {
             funding_source_risk: "traced_clean".to_string(),
             funder: None,
             funder_labels: vec![],
+            counterparty_labels: vec![],
             first_seen_ts: 1700000000,
             latest_tx_ts: 1715000000,
             counterparty_metrics_estimated: true,
@@ -244,6 +255,26 @@ mod tests {
         let flagged = score_wallet("SomeHealthyWallet111111111111111111111111111", &signals);
         assert!(flagged.risk_score > clean.risk_score);
         assert!(flagged.flags.contains(&"FUNDED_BY_LABELED".to_string()));
+    }
+
+    #[test]
+    fn labeled_counterparty_raises_score() {
+        let mut signals = base_signals();
+        signals.counterparty_labels = vec![crate::signals::tx::TxLabelHit {
+            program: "Drainer111111111111111111111111111111111111".to_string(),
+            source: "test".to_string(),
+            label: "drainer".to_string(),
+        }];
+        let clean = score_wallet(
+            "SomeHealthyWallet111111111111111111111111111",
+            &base_signals(),
+        );
+        let flagged = score_wallet("SomeHealthyWallet111111111111111111111111111", &signals);
+        assert!(flagged.risk_score > clean.risk_score);
+        assert!(flagged
+            .flags
+            .iter()
+            .any(|f| f.starts_with("COUNTERPARTY_LABELED")));
     }
 
     #[test]

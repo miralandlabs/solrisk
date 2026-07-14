@@ -30,6 +30,9 @@ pub struct ChainSignals {
     pub funder: Option<String>,
     /// Deny-label hits on the funder (empty = clean or unknown).
     pub funder_labels: Vec<crate::signals::tx::TxLabelHit>,
+    /// Deny-labeled recent counterparties (P1.2) — addresses this wallet transacted with
+    /// that are on the deny list. Empty = clean or not measured.
+    pub counterparty_labels: Vec<crate::signals::tx::TxLabelHit>,
     pub first_seen_ts: i64,
     pub latest_tx_ts: i64,
     /// Counterparty/program counts are estimated without parsed transactions.
@@ -52,6 +55,7 @@ impl Default for ChainSignals {
             funding_source_risk: "not_checked".to_string(),
             funder: None,
             funder_labels: Vec::new(),
+            counterparty_labels: Vec::new(),
             first_seen_ts: 0,
             latest_tx_ts: 0,
             counterparty_metrics_estimated: true,
@@ -194,24 +198,53 @@ pub async fn collect_chain_signals(
     let trace =
         crate::signals::funding::trace_funder(rpc, &pubkey, earliest_sig, reached_genesis).await;
 
-    // Counterparty / program metrics require parsing every tx (P1.2). Until then they are
-    // reported as null, never synthesized from tx counts.
+    // P1.2: parse a bounded window of recent (30d) txns for real counterparty / program
+    // metrics + deny-labeled counterparty exposure. Best-effort — falls back to null.
+    let recent_sigs: Vec<String> = all_sigs
+        .iter()
+        .filter(|s| {
+            s.block_time
+                .map(|bt| bt >= thirty_days_ago)
+                .unwrap_or(false)
+        })
+        .map(|s| s.signature.clone())
+        .collect();
+    let activity = crate::signals::activity::analyze_recent_activity(
+        rpc,
+        &pubkey,
+        &recent_sigs,
+        crate::signals::activity::max_tx_parse(),
+    )
+    .await;
+
+    let (unique_counterparties_30d, program_diversity_30d, counterparty_metrics_estimated) =
+        if activity.measured {
+            (
+                Some(activity.unique_counterparties),
+                Some(activity.program_diversity),
+                false,
+            )
+        } else {
+            (None, None, true)
+        };
+
     Ok(ChainSignals {
         age_days,
         tx_count_total,
         tx_count_30d,
-        unique_counterparties_30d: None,
+        unique_counterparties_30d,
         sol_balance_lamports: sol_balance,
         spl_account_count,
         has_activity_48h,
-        program_diversity_30d: None,
+        program_diversity_30d,
         is_fresh_funded,
         funding_source_risk: trace.classification,
         funder: trace.funder,
         funder_labels: trace.funder_labels,
+        counterparty_labels: activity.counterparty_labels,
         first_seen_ts,
         latest_tx_ts,
-        counterparty_metrics_estimated: true,
+        counterparty_metrics_estimated,
         sig_pages_fetched: pages_fetched,
     })
 }

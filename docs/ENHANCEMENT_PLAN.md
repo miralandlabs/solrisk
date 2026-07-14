@@ -28,8 +28,11 @@ Turn the reserved `501` route into a real SKU. Input a base64 **unsigned** trans
   discloses `WOULD_FAIL` (tx reverts) and the subject's **net SOL change**; a simulated
   outflow *through an opaque program* escalates to REVIEW (`OUTFLOW_VIA_UNKNOWN_PROGRAM`),
   while legitimate sends are never flagged. RPC-unavailable falls back to the static verdict.
-- **v1.2 — token-balance deltas:** extend simulation to the subject's SPL token accounts so
-  token drains (the common case) are quantified alongside SOL.
+- **v1.2 — token-balance deltas (shipped, v0.3.0):** simulation also measures the subject's
+  SPL-token balance changes (bounded to the token accounts the tx touches) →
+  `net_token_changes`. A token outflow *through an opaque program* escalates
+  (`TOKEN_OUTFLOW_VIA_UNKNOWN_PROGRAM`); a legitimate token send is not. Token-2022 accounts
+  are the next follow-up.
 - Input: `?transaction=<base64>` (pre-sign, primary). `?signature=` (post-hoc forensics via
   `getParsedTransaction`) is a later, lower-value slice.
 

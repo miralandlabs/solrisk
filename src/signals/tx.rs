@@ -4,8 +4,9 @@
 //! deterministic danger patterns an agent must catch *before it signs*: interactions
 //! with deny-labeled programs, SPL Token authority handoffs, token delegations, and
 //! account closures. This is pure-CPU and always succeeds once the tx decodes, so the
-//! money-critical verdict never depends on an RPC round-trip. Balance-delta drain
-//! detection via `simulateTransaction` is the documented v1.1 slice.
+//! money-critical verdict never depends on an RPC round-trip. Best-effort simulation
+//! (`simulate`) enriches it with the subject's net SOL (v1.1) and SPL-token (v1.2) balance
+//! changes; on any RPC failure the deterministic static verdict still stands.
 //!
 //! Honesty: what can't be statically resolved (programs behind address lookup tables)
 //! is reported as reduced visibility, never silently treated as safe.
@@ -13,15 +14,17 @@
 use crate::signals::labels::deny_index;
 use base64::Engine;
 use serde::Serialize;
-use solana_account_decoder_client_types::UiAccountEncoding;
+use solana_account_decoder_client_types::{UiAccountData, UiAccountEncoding};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::{
     RpcSimulateTransactionAccountsConfig, RpcSimulateTransactionConfig,
 };
+use solana_client::rpc_request::TokenAccountsFilter;
 use solana_commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction::VersionedTransaction;
 use spl_token::instruction::TokenInstruction;
+use std::collections::HashSet;
 
 /// Meaningful SOL outflow (0.01 SOL) — used to sharpen the unknown-program concern when
 /// simulation shows value actually leaving the subject through an opaque program.
@@ -42,6 +45,14 @@ pub struct TxLabelHit {
     pub label: String,
 }
 
+/// A simulated net change in one token balance for the subject (v1.2).
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenChange {
+    pub mint: String,
+    /// Raw base-unit delta (post − pre). Negative = tokens left the subject.
+    pub delta_raw: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TxSignals {
     /// Fee payer (first static account key), whose safety we assess by default.
@@ -60,6 +71,9 @@ pub struct TxSignals {
     pub simulation_error: Option<String>,
     /// Subject's net SOL change from simulation, in lamports (negative = outflow). v1.1.
     pub net_sol_change_lamports: Option<i64>,
+    /// Per-mint net token changes for the subject's touched token accounts (v1.2).
+    /// Negative `delta_raw` = outflow. Empty when not simulated or no token accounts touched.
+    pub net_token_changes: Vec<TokenChange>,
     // ---- findings ----
     /// Program on the deny list (known drainer/scam) — highest severity.
     pub deny_program_hits: Vec<TxLabelHit>,
@@ -127,6 +141,7 @@ pub fn analyze(tx: &VersionedTransaction, owner_override: Option<&str>) -> TxSig
         simulated: false,
         simulation_error: None,
         net_sol_change_lamports: None,
+        net_token_changes: Vec::new(),
         deny_program_hits: Vec::new(),
         authority_handoffs: Vec::new(),
         delegations: 0,
@@ -181,31 +196,103 @@ pub fn analyze(tx: &VersionedTransaction, owner_override: Option<&str>) -> TxSig
     signals
 }
 
-/// Best-effort v1.1 enrichment: `simulateTransaction` (with `replaceRecentBlockhash` so
-/// the unsigned tx simulates) to disclose whether the tx would fail and the subject's net
-/// SOL change. **Never fails the request** — on any RPC error the caller keeps the
-/// deterministic static verdict, preserving v1's "always answers" property. Token-balance
-/// deltas are the documented v1.2 slice.
+/// Result of the best-effort simulation enrichment.
+pub struct SimOutcome {
+    pub simulated: bool,
+    pub error: Option<String>,
+    pub net_sol_change_lamports: Option<i64>,
+    pub net_token_changes: Vec<TokenChange>,
+}
+
+impl SimOutcome {
+    fn none() -> Self {
+        Self {
+            simulated: false,
+            error: None,
+            net_sol_change_lamports: None,
+            net_token_changes: Vec::new(),
+        }
+    }
+}
+
+/// Parse an SPL token account's `(mint, amount)` from either encoding a node may return
+/// (jsonParsed or base64). Returns `None` for anything that isn't a decodable token account.
+fn parse_token_account(data: &UiAccountData) -> Option<(String, u64)> {
+    match data {
+        UiAccountData::Json(parsed) => {
+            let info = parsed.parsed.get("info")?;
+            let mint = info.get("mint")?.as_str()?.to_string();
+            let amount = info
+                .get("tokenAmount")?
+                .get("amount")?
+                .as_str()?
+                .parse()
+                .ok()?;
+            Some((mint, amount))
+        }
+        UiAccountData::Binary(s, UiAccountEncoding::Base64) => {
+            let bytes = base64::engine::general_purpose::STANDARD.decode(s).ok()?;
+            if bytes.len() < 72 {
+                return None; // not an initialized SPL token account
+            }
+            let mint = Pubkey::new_from_array(bytes[0..32].try_into().ok()?).to_string();
+            let amount = u64::from_le_bytes(bytes[64..72].try_into().ok()?);
+            Some((mint, amount))
+        }
+        _ => None,
+    }
+}
+
+/// Best-effort v1.1/v1.2 enrichment: `simulateTransaction` (with `replaceRecentBlockhash`
+/// so the unsigned tx simulates) to disclose whether the tx would fail, and the subject's
+/// net **SOL** and **SPL-token** balance changes. Token accounts are bounded to those the
+/// subject owns *and* the tx touches (only they can change). **Never fails the request** —
+/// on any RPC error the caller keeps the deterministic static verdict. Token-2022 accounts
+/// are a follow-up.
 pub async fn simulate(
     rpc: &RpcClient,
     tx: &VersionedTransaction,
     subject: Option<&str>,
-) -> (bool, Option<String>, Option<i64>) {
+) -> SimOutcome {
     let Some(subject) = subject else {
-        return (false, None, None);
+        return SimOutcome::none();
     };
     let Ok(subject_pk) = subject.parse::<Pubkey>() else {
-        return (false, None, None);
+        return SimOutcome::none();
     };
 
-    let pre = rpc.get_balance(&subject_pk).await.ok();
+    // Subject's SPL token accounts that this tx references (pubkey, mint, pre-amount).
+    let tx_keys: HashSet<String> = tx
+        .message
+        .static_account_keys()
+        .iter()
+        .map(|k| k.to_string())
+        .collect();
+    let mut touched: Vec<(String, String, u64)> = Vec::new();
+    if let Ok(accts) = rpc
+        .get_token_accounts_by_owner(&subject_pk, TokenAccountsFilter::ProgramId(spl_token::id()))
+        .await
+    {
+        for ka in accts {
+            if tx_keys.contains(&ka.pubkey) {
+                if let Some((mint, amount)) = parse_token_account(&ka.account.data) {
+                    touched.push((ka.pubkey, mint, amount));
+                }
+            }
+        }
+    }
+
+    let pre_sol = rpc.get_balance(&subject_pk).await.ok();
+
+    let mut addresses = vec![subject.to_string()];
+    addresses.extend(touched.iter().map(|(pk, _, _)| pk.clone()));
     let cfg = RpcSimulateTransactionConfig {
         sig_verify: false,
         replace_recent_blockhash: true,
         commitment: Some(CommitmentConfig::confirmed()),
         encoding: None,
         accounts: Some(RpcSimulateTransactionAccountsConfig {
-            addresses: vec![subject.to_string()],
+            addresses,
             encoding: Some(UiAccountEncoding::Base64),
         }),
         inner_instructions: false,
@@ -215,21 +302,43 @@ pub async fn simulate(
     match rpc.simulate_transaction_with_config(tx, cfg).await {
         Ok(resp) => {
             let error = resp.value.err.map(|e| format!("{e:?}"));
-            let post = resp
-                .value
-                .accounts
-                .as_ref()
-                .and_then(|v| v.first())
+            let accounts = resp.value.accounts.unwrap_or_default();
+            // Sim returns accounts in the requested order: [subject, touched tokens...].
+            let post_sol = accounts
+                .first()
                 .and_then(|o| o.as_ref())
                 .map(|ui| ui.lamports);
-            let net = match (pre, post) {
+            let net_sol_change_lamports = match (pre_sol, post_sol) {
                 (Some(p), Some(q)) => Some(q as i64 - p as i64),
                 _ => None,
             };
-            (true, error, net)
+
+            let mut net_token_changes = Vec::new();
+            for (i, (_, mint, pre)) in touched.iter().enumerate() {
+                let post = accounts
+                    .get(i + 1)
+                    .and_then(|o| o.as_ref())
+                    .and_then(|ui| parse_token_account(&ui.data))
+                    .map(|(_, amt)| amt)
+                    .unwrap_or(0); // account closed/emptied in the tx → 0
+                let delta = post as i64 - *pre as i64;
+                if delta != 0 {
+                    net_token_changes.push(TokenChange {
+                        mint: mint.clone(),
+                        delta_raw: delta,
+                    });
+                }
+            }
+
+            SimOutcome {
+                simulated: true,
+                error,
+                net_sol_change_lamports,
+                net_token_changes,
+            }
         }
         // RPC/sim unavailable → keep the static verdict; disclose nothing we didn't observe.
-        Err(_) => (false, None, None),
+        Err(_) => SimOutcome::none(),
     }
 }
 

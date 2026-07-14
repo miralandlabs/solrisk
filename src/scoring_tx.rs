@@ -81,6 +81,14 @@ pub fn score_tx(signals: &TxSignals) -> TxRiskResult {
             flags.push(format!("OUTFLOW_VIA_UNKNOWN_PROGRAM:{}", -n));
         }
     }
+    // v1.2: a simulated token outflow through an opaque program is the common drainer
+    // signature — same honest gate as SOL (a legitimate token send is not escalated).
+    let token_outflow_via_unknown = signals.net_token_changes.iter().any(|c| c.delta_raw < 0)
+        && !signals.unknown_programs.is_empty();
+    if token_outflow_via_unknown {
+        score += 25;
+        flags.push("TOKEN_OUTFLOW_VIA_UNKNOWN_PROGRAM".to_string());
+    }
 
     let final_score = score.clamp(0, 100) as u8;
     let band = match final_score {
@@ -96,7 +104,8 @@ pub fn score_tx(signals: &TxSignals) -> TxRiskResult {
         || signals.uses_lookup_tables
         || !signals.unknown_programs.is_empty()
         || signals.simulation_error.is_some()
-        || outflow_via_unknown;
+        || outflow_via_unknown
+        || token_outflow_via_unknown;
     let recommendation = if has_block {
         "BLOCK"
     } else if has_review {
@@ -148,6 +157,7 @@ mod tests {
             simulated: false,
             simulation_error: None,
             net_sol_change_lamports: None,
+            net_token_changes: vec![],
             deny_program_hits: vec![],
             authority_handoffs: vec![],
             delegations: 0,
@@ -232,6 +242,37 @@ mod tests {
         s.net_sol_change_lamports = Some(-5_000_000_000); // -5 SOL, but to known programs
         let r = score_tx(&s);
         assert_eq!(r.recommendation, "SIGN");
+    }
+
+    #[test]
+    fn legit_token_send_alone_still_signs() {
+        // A token outflow to known programs (a normal SPL transfer) is not escalated.
+        let mut s = clean();
+        s.simulated = true;
+        s.net_token_changes = vec![crate::signals::tx::TokenChange {
+            mint: "So11111111111111111111111111111111111111112".into(),
+            delta_raw: -1_000_000,
+        }];
+        let r = score_tx(&s);
+        assert_eq!(r.recommendation, "SIGN");
+    }
+
+    #[test]
+    fn token_outflow_via_unknown_program_escalates() {
+        let mut s = clean();
+        s.simulated = true;
+        s.unknown_programs
+            .push("Opaque11111111111111111111111111111111111".into());
+        s.net_token_changes = vec![crate::signals::tx::TokenChange {
+            mint: "So11111111111111111111111111111111111111112".into(),
+            delta_raw: -1_000_000,
+        }];
+        let r = score_tx(&s);
+        assert_eq!(r.recommendation, "REVIEW");
+        assert!(r
+            .flags
+            .iter()
+            .any(|f| f == "TOKEN_OUTFLOW_VIA_UNKNOWN_PROGRAM"));
     }
 
     #[test]

@@ -500,11 +500,11 @@ pub async fn handle_tx_risk(
     // Static screen is pure-CPU — always available. Simulation (v1.1) enriches it
     // best-effort: on any RPC failure we keep the deterministic static verdict.
     let mut signals = tx::analyze(&decoded, owner_override);
-    let (simulated, sim_error, net_sol) =
-        tx::simulate(&state.rpc_client, &decoded, signals.subject.as_deref()).await;
-    signals.simulated = simulated;
-    signals.simulation_error = sim_error;
-    signals.net_sol_change_lamports = net_sol;
+    let sim = tx::simulate(&state.rpc_client, &decoded, signals.subject.as_deref()).await;
+    signals.simulated = sim.simulated;
+    signals.simulation_error = sim.error;
+    signals.net_sol_change_lamports = sim.net_sol_change_lamports;
+    signals.net_token_changes = sim.net_token_changes;
     let result = scoring_tx::score_tx(&signals);
 
     let mut body = serde_json::json!({

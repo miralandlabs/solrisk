@@ -59,7 +59,10 @@ subject's net SOL change (`net_sol_change_lamports`). A simulated SOL outflow is
 **only** when it leaves the subject *through an opaque/unlabeled program*
 (`OUTFLOW_VIA_UNKNOWN_PROGRAM`) — a legitimate send to known programs is never flagged. If
 the RPC/sim is unavailable, the deterministic static verdict still stands (`simulated:
-false`). Token-balance deltas are the v1.2 slice.
+false`). **v1.2** extends this to the subject's **SPL-token** balance changes
+(`net_token_changes`, bounded to token accounts the tx touches) — a token outflow *through
+an opaque program* escalates (`TOKEN_OUTFLOW_VIA_UNKNOWN_PROGRAM`), a normal token send does
+not. Token-2022 accounts are the next follow-up.
 
 **Contract notes.** A non-base64 `transaction` is rejected **before** payment (`400`). A
 paid request whose input is valid base64 but not a decodable transaction returns `422`

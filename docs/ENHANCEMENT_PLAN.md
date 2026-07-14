@@ -34,10 +34,18 @@ Turn the reserved `501` route into a real SKU. Input a base64 **unsigned** trans
   `getParsedTransaction`) is a later, lower-value slice.
 
 ### P1 — make `funding_source_risk` real (fund-flow graph)
-Today `funding_source_from_sigs(tx_count, age_days, first_seen_ts)` is a heuristic that **never
-traces anything**. Replace with actual tracing: earliest inbound transfers → walk 2–3 hops →
-cross-reference each hop against deny labels (mixers, bridges, sanctioned, drainers); add
-counterparty exposure (`% inflow from labeled-bad`). This is the AML moat. **Lifts wallet-risk → $0.25.**
+The old `funding_source_from_sigs(tx_count, age_days, first_seen_ts)` heuristic **traced
+nothing**. This is the AML moat. **Lifts wallet-risk → $0.25.**
+
+- **P1 v1 — direct funder trace (shipped, v0.3.0):** once signature pagination reaches the
+  wallet's **genesis** tx, fetch it, extract the original funder (largest SOL sender to the
+  wallet in its first tx), and deny-label-check them. Real classifications replace the
+  heuristic: `no_history` | `partial_history` | `genesis_untraceable` | `labeled_bad` |
+  `traced_clean`; a deny-labeled funder adds `FUNDED_BY_LABELED`. Honest: partial history or
+  an unmappable (lookup-table) genesis is reported, never guessed.
+- **P1.1 — multi-hop:** walk 2–3 hops back and label-check each.
+- **P1.2 — counterparty exposure:** parse recent txns for `% inflow from labeled-bad` and
+  real `unique_counterparties_30d` (still `null` today).
 
 ### P2 — complete `token-risk` rug depth
 Add LP pool discovery + **lock/burn** status + depth-vs-mcap; **deployer history** (serial-rugger

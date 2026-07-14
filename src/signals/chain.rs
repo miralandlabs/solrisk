@@ -23,7 +23,13 @@ pub struct ChainSignals {
     /// `null` unless derived from parsed transactions. Never synthesized.
     pub program_diversity_30d: Option<u64>,
     pub is_fresh_funded: bool,
+    /// Real fund-flow classification (P1): `no_history` | `partial_history` |
+    /// `genesis_untraceable` | `labeled_bad` | `traced_clean`.
     pub funding_source_risk: String,
+    /// Original funder (base58) when the genesis tx was reached + mapped. Never guessed.
+    pub funder: Option<String>,
+    /// Deny-label hits on the funder (empty = clean or unknown).
+    pub funder_labels: Vec<crate::signals::tx::TxLabelHit>,
     pub first_seen_ts: i64,
     pub latest_tx_ts: i64,
     /// Counterparty/program counts are estimated without parsed transactions.
@@ -44,6 +50,8 @@ impl Default for ChainSignals {
             program_diversity_30d: None,
             is_fresh_funded: false,
             funding_source_risk: "not_checked".to_string(),
+            funder: None,
+            funder_labels: Vec::new(),
             first_seen_ts: 0,
             latest_tx_ts: 0,
             counterparty_metrics_estimated: true,
@@ -57,20 +65,6 @@ fn max_sig_pages() -> u32 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(5)
-}
-
-fn funding_source_from_sigs(tx_count: u64, age_days: u64, first_seen_ts: i64) -> String {
-    if tx_count == 0 {
-        return "no_history".to_string();
-    }
-    if age_days < 1 && tx_count < 5 {
-        return "fresh_unknown".to_string();
-    }
-    if first_seen_ts > 0 {
-        "untraced".to_string()
-    } else {
-        "insufficient_data".to_string()
-    }
 }
 
 pub async fn collect_chain_signals(
@@ -114,6 +108,9 @@ pub async fn collect_chain_signals(
     let mut before: Option<solana_sdk::signature::Signature> = None;
     let max_pages = max_sig_pages();
     let mut pages_fetched: u32 = 0;
+    // True once a page returns < 100 sigs — i.e. we've paginated back to the wallet's
+    // first transaction. Required before we can honestly trace the original funder.
+    let mut reached_genesis = false;
 
     for page in 0..max_pages {
         let rpc_sig = Arc::clone(rpc);
@@ -143,6 +140,7 @@ pub async fn collect_chain_signals(
                 }
                 all_sigs.extend(sigs);
                 if is_last {
+                    reached_genesis = true;
                     break;
                 }
             }
@@ -185,10 +183,19 @@ pub async fn collect_chain_signals(
     };
 
     let is_fresh_funded = age_days < 1 && tx_count_total < 5;
-    let funding_source_risk = funding_source_from_sigs(tx_count_total, age_days, first_seen_ts);
 
-    // Counterparty / program metrics require parsed transactions (P1).
-    // Until then they are reported as null, never synthesized from tx counts.
+    // P1 fund-flow trace: the wallet's oldest signature is the last one collected once we
+    // reached genesis. Best-effort — never guesses a funder it didn't observe.
+    let earliest_sig = if reached_genesis {
+        all_sigs.last().map(|s| s.signature.as_str())
+    } else {
+        None
+    };
+    let trace =
+        crate::signals::funding::trace_funder(rpc, &pubkey, earliest_sig, reached_genesis).await;
+
+    // Counterparty / program metrics require parsing every tx (P1.2). Until then they are
+    // reported as null, never synthesized from tx counts.
     Ok(ChainSignals {
         age_days,
         tx_count_total,
@@ -199,7 +206,9 @@ pub async fn collect_chain_signals(
         has_activity_48h,
         program_diversity_30d: None,
         is_fresh_funded,
-        funding_source_risk,
+        funding_source_risk: trace.classification,
+        funder: trace.funder,
+        funder_labels: trace.funder_labels,
         first_seen_ts,
         latest_tx_ts,
         counterparty_metrics_estimated: true,

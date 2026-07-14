@@ -59,8 +59,19 @@ pub fn score_wallet(wallet: &str, signals: &ChainSignals) -> RiskResult {
         flags.push("DUST_PATTERN".to_string());
     }
 
-    if signals.funding_source_risk == "fresh_unknown" {
-        score += 10;
+    // P1 fund-flow: funded by a deny-labeled address (mixer / sanctioned / drainer) is a
+    // strong risk signal an agent can't cheaply derive itself.
+    if !signals.funder_labels.is_empty() {
+        score += 40;
+        flags.push("FUNDED_BY_LABELED".to_string());
+    }
+    // Provenance we could not establish (deep history beyond our page budget, or a
+    // genesis tx we couldn't map) — a mild caution, never a fabricated verdict.
+    if matches!(
+        signals.funding_source_risk.as_str(),
+        "partial_history" | "genesis_untraceable"
+    ) {
+        score += 5;
         flags.push("FUNDING_UNTRACED".to_string());
     }
 
@@ -177,7 +188,9 @@ mod tests {
             has_activity_48h: true,
             program_diversity_30d: Some(8),
             is_fresh_funded: false,
-            funding_source_risk: "untraced".to_string(),
+            funding_source_risk: "traced_clean".to_string(),
+            funder: None,
+            funder_labels: vec![],
             first_seen_ts: 1700000000,
             latest_tx_ts: 1715000000,
             counterparty_metrics_estimated: true,
@@ -213,6 +226,24 @@ mod tests {
             estimated.risk_score,
             real.risk_score
         );
+    }
+
+    #[test]
+    fn funded_by_labeled_address_raises_score() {
+        let mut signals = base_signals();
+        signals.funder = Some("Mixer1111111111111111111111111111111111111".to_string());
+        signals.funder_labels = vec![crate::signals::tx::TxLabelHit {
+            program: "Mixer1111111111111111111111111111111111111".to_string(),
+            source: "test".to_string(),
+            label: "mixer".to_string(),
+        }];
+        let clean = score_wallet(
+            "SomeHealthyWallet111111111111111111111111111",
+            &base_signals(),
+        );
+        let flagged = score_wallet("SomeHealthyWallet111111111111111111111111111", &signals);
+        assert!(flagged.risk_score > clean.risk_score);
+        assert!(flagged.flags.contains(&"FUNDED_BY_LABELED".to_string()));
     }
 
     #[test]

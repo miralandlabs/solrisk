@@ -13,8 +13,19 @@
 use crate::signals::labels::deny_index;
 use base64::Engine;
 use serde::Serialize;
+use solana_account_decoder_client_types::UiAccountEncoding;
+use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_client::rpc_config::{
+    RpcSimulateTransactionAccountsConfig, RpcSimulateTransactionConfig,
+};
+use solana_commitment_config::CommitmentConfig;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction::VersionedTransaction;
 use spl_token::instruction::TokenInstruction;
+
+/// Meaningful SOL outflow (0.01 SOL) — used to sharpen the unknown-program concern when
+/// simulation shows value actually leaving the subject through an opaque program.
+pub const OUTFLOW_LAMPORTS_THRESHOLD: i64 = 10_000_000;
 
 /// Well-known programs that are expected in benign transactions.
 const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
@@ -43,8 +54,12 @@ pub struct TxSignals {
     /// v0 tx whose programs/accounts partly live in an address lookup table → we
     /// cannot fully vet them statically. Reduces confidence; never assumed safe.
     pub uses_lookup_tables: bool,
-    /// v1 is static-only; balance-delta simulation is v1.1.
+    /// True once best-effort `simulateTransaction` enrichment ran (v1.1).
     pub simulated: bool,
+    /// On-chain simulation error — the tx would fail if signed. `None` = ran clean or not simulated.
+    pub simulation_error: Option<String>,
+    /// Subject's net SOL change from simulation, in lamports (negative = outflow). v1.1.
+    pub net_sol_change_lamports: Option<i64>,
     // ---- findings ----
     /// Program on the deny list (known drainer/scam) — highest severity.
     pub deny_program_hits: Vec<TxLabelHit>,
@@ -110,6 +125,8 @@ pub fn analyze(tx: &VersionedTransaction, owner_override: Option<&str>) -> TxSig
         programs: Vec::new(),
         uses_lookup_tables,
         simulated: false,
+        simulation_error: None,
+        net_sol_change_lamports: None,
         deny_program_hits: Vec::new(),
         authority_handoffs: Vec::new(),
         delegations: 0,
@@ -162,6 +179,58 @@ pub fn analyze(tx: &VersionedTransaction, owner_override: Option<&str>) -> TxSig
     }
 
     signals
+}
+
+/// Best-effort v1.1 enrichment: `simulateTransaction` (with `replaceRecentBlockhash` so
+/// the unsigned tx simulates) to disclose whether the tx would fail and the subject's net
+/// SOL change. **Never fails the request** — on any RPC error the caller keeps the
+/// deterministic static verdict, preserving v1's "always answers" property. Token-balance
+/// deltas are the documented v1.2 slice.
+pub async fn simulate(
+    rpc: &RpcClient,
+    tx: &VersionedTransaction,
+    subject: Option<&str>,
+) -> (bool, Option<String>, Option<i64>) {
+    let Some(subject) = subject else {
+        return (false, None, None);
+    };
+    let Ok(subject_pk) = subject.parse::<Pubkey>() else {
+        return (false, None, None);
+    };
+
+    let pre = rpc.get_balance(&subject_pk).await.ok();
+    let cfg = RpcSimulateTransactionConfig {
+        sig_verify: false,
+        replace_recent_blockhash: true,
+        commitment: Some(CommitmentConfig::confirmed()),
+        encoding: None,
+        accounts: Some(RpcSimulateTransactionAccountsConfig {
+            addresses: vec![subject.to_string()],
+            encoding: Some(UiAccountEncoding::Base64),
+        }),
+        inner_instructions: false,
+        min_context_slot: None,
+    };
+
+    match rpc.simulate_transaction_with_config(tx, cfg).await {
+        Ok(resp) => {
+            let error = resp.value.err.map(|e| format!("{e:?}"));
+            let post = resp
+                .value
+                .accounts
+                .as_ref()
+                .and_then(|v| v.first())
+                .and_then(|o| o.as_ref())
+                .map(|ui| ui.lamports);
+            let net = match (pre, post) {
+                (Some(p), Some(q)) => Some(q as i64 - p as i64),
+                _ => None,
+            };
+            (true, error, net)
+        }
+        // RPC/sim unavailable → keep the static verdict; disclose nothing we didn't observe.
+        Err(_) => (false, None, None),
+    }
 }
 
 #[cfg(test)]

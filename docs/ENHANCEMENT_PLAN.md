@@ -24,8 +24,12 @@ Turn the reserved `501` route into a real SKU. Input a base64 **unsigned** trans
   - **CloseAccount** with rent to a third party → `REVIEW`
   - unknown/unlabeled program touched → contributes to `REVIEW`
   - subject = fee payer (or `?owner=` override); honest `simulated: false`.
-- **v1.1 — simulation depth:** `simulateTransaction` with the subject's accounts to measure
-  **net SOL/token outflow** (true drain detection) and confirm the static flags with balance deltas.
+- **v1.1 — simulation enrichment (shipped, v0.3.0):** best-effort `simulateTransaction`
+  discloses `WOULD_FAIL` (tx reverts) and the subject's **net SOL change**; a simulated
+  outflow *through an opaque program* escalates to REVIEW (`OUTFLOW_VIA_UNKNOWN_PROGRAM`),
+  while legitimate sends are never flagged. RPC-unavailable falls back to the static verdict.
+- **v1.2 — token-balance deltas:** extend simulation to the subject's SPL token accounts so
+  token drains (the common case) are quantified alongside SOL.
 - Input: `?transaction=<base64>` (pre-sign, primary). `?signature=` (post-hoc forensics via
   `getParsedTransaction`) is a later, lower-value slice.
 

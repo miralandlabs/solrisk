@@ -50,8 +50,16 @@ highest-value pre-flight decision in the agentic economy ("should I sign this?")
   static visibility — never assumed safe).
 - **`SIGN`** — only well-known, benign programs (System / Token / ATA / ComputeBudget / Memo).
 
-Because v1 is pure-CPU, the verdict is deterministic once the tx decodes — it never
-depends on an RPC round-trip. Subject defaults to the fee payer; override with `owner`.
+Because the static base is pure-CPU, the verdict is deterministic once the tx decodes —
+it never depends on an RPC round-trip. Subject defaults to the fee payer; override with `owner`.
+
+**v1.1 — simulation enrichment (best-effort).** On top of the static base, a
+`simulateTransaction` pass discloses whether the tx would revert (`WOULD_FAIL`) and the
+subject's net SOL change (`net_sol_change_lamports`). A simulated SOL outflow is escalated
+**only** when it leaves the subject *through an opaque/unlabeled program*
+(`OUTFLOW_VIA_UNKNOWN_PROGRAM`) — a legitimate send to known programs is never flagged. If
+the RPC/sim is unavailable, the deterministic static verdict still stands (`simulated:
+false`). Token-balance deltas are the v1.2 slice.
 
 **Contract notes.** A non-base64 `transaction` is rejected **before** payment (`400`). A
 paid request whose input is valid base64 but not a decodable transaction returns `422`

@@ -51,7 +51,11 @@ nothing**. This is the AML moat. **Lifts wallet-risk → $0.25.**
   + `program_diversity_30d` (no longer `null`) and deny-labeled counterparty exposure
   (`COUNTERPARTY_LABELED` +30 — "who does this wallet deal with"). Best-effort; a tx that
   can't be mapped (lookup tables) is skipped, not guessed. Scoring → v1.3.0.
-- **P1.1 — multi-hop:** walk 2–3 hops back from the funder and label-check each.
+- **P1.1 — multi-hop (shipped, v0.3.0):** walks up to `SOLRISK_MAX_FUNDER_HOPS` (default 3)
+  hops back — each hop paginates that address to its genesis (`SOLRISK_FUNDER_HOP_PAGES`,
+  default 3) and extracts its funder; every hop is deny-checked. Surfaces `funding_chain`;
+  a labeled hop ≥ 2 adds `FUNDING_CHAIN_LABELED:hop{n}` with weight diluting by distance
+  (hop2 +25, hop3 +15). Stops early at a labeled or untraceable hop — never guesses.
 - **Follow-ups:** parallelize the P1.2 getTransaction fan-out (currently sequential,
   bounded); Token-2022 in the tx-risk sim; `% inflow from labeled-bad` weighting.
 

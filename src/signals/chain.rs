@@ -30,6 +30,8 @@ pub struct ChainSignals {
     pub funder: Option<String>,
     /// Deny-label hits on the funder (empty = clean or unknown).
     pub funder_labels: Vec<crate::signals::tx::TxLabelHit>,
+    /// Multi-hop funder chain (P1.1), hop 1..N. Empty when not traced.
+    pub funding_chain: Vec<crate::signals::funding::FundingHop>,
     /// Deny-labeled recent counterparties (P1.2) — addresses this wallet transacted with
     /// that are on the deny list. Empty = clean or not measured.
     pub counterparty_labels: Vec<crate::signals::tx::TxLabelHit>,
@@ -55,6 +57,7 @@ impl Default for ChainSignals {
             funding_source_risk: "not_checked".to_string(),
             funder: None,
             funder_labels: Vec::new(),
+            funding_chain: Vec::new(),
             counterparty_labels: Vec::new(),
             first_seen_ts: 0,
             latest_tx_ts: 0,
@@ -241,6 +244,7 @@ pub async fn collect_chain_signals(
         funding_source_risk: trace.classification,
         funder: trace.funder,
         funder_labels: trace.funder_labels,
+        funding_chain: trace.funding_chain,
         counterparty_labels: activity.counterparty_labels,
         first_seen_ts,
         latest_tx_ts,

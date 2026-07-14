@@ -65,6 +65,21 @@ pub fn score_wallet(wallet: &str, signals: &ChainSignals) -> RiskResult {
         score += 40;
         flags.push("FUNDED_BY_LABELED".to_string());
     }
+    // P1.1 multi-hop: a labeled address deeper in the funding chain (hop ≥ 2) — closer hops
+    // weigh more (dilution with distance).
+    if let Some(hop) = signals
+        .funding_chain
+        .iter()
+        .filter(|h| h.hop >= 2 && !h.labels.is_empty())
+        .min_by_key(|h| h.hop)
+    {
+        let weight = match hop.hop {
+            2 => 25,
+            _ => 15,
+        };
+        score += weight;
+        flags.push(format!("FUNDING_CHAIN_LABELED:hop{}", hop.hop));
+    }
     // Provenance we could not establish (deep history beyond our page budget, or a
     // genesis tx we couldn't map) — a mild caution, never a fabricated verdict.
     if matches!(
@@ -201,6 +216,7 @@ mod tests {
             funding_source_risk: "traced_clean".to_string(),
             funder: None,
             funder_labels: vec![],
+            funding_chain: vec![],
             counterparty_labels: vec![],
             first_seen_ts: 1700000000,
             latest_tx_ts: 1715000000,
@@ -255,6 +271,54 @@ mod tests {
         let flagged = score_wallet("SomeHealthyWallet111111111111111111111111111", &signals);
         assert!(flagged.risk_score > clean.risk_score);
         assert!(flagged.flags.contains(&"FUNDED_BY_LABELED".to_string()));
+    }
+
+    #[test]
+    fn labeled_second_hop_funder_raises_score_less_than_direct() {
+        use crate::signals::funding::FundingHop;
+        use crate::signals::tx::TxLabelHit;
+        let hit = |addr: &str| {
+            vec![TxLabelHit {
+                program: addr.to_string(),
+                source: "test".to_string(),
+                label: "mixer".to_string(),
+            }]
+        };
+        let wallet = "SomeHealthyWallet111111111111111111111111111";
+
+        // Direct funder labeled → FUNDED_BY_LABELED (+40).
+        let mut direct = base_signals();
+        direct.funder_labels = hit("Mix1");
+        direct.funding_chain = vec![FundingHop {
+            address: "Mix1".into(),
+            hop: 1,
+            labels: hit("Mix1"),
+        }];
+        let direct_r = score_wallet(wallet, &direct);
+
+        // Clean hop 1, labeled hop 2 → FUNDING_CHAIN_LABELED:hop2 (+25), no FUNDED_BY_LABELED.
+        let mut second = base_signals();
+        second.funding_chain = vec![
+            FundingHop {
+                address: "Clean1".into(),
+                hop: 1,
+                labels: vec![],
+            },
+            FundingHop {
+                address: "Mix2".into(),
+                hop: 2,
+                labels: hit("Mix2"),
+            },
+        ];
+        let second_r = score_wallet(wallet, &second);
+
+        assert!(second_r.risk_score > score_wallet(wallet, &base_signals()).risk_score);
+        assert!(second_r.risk_score < direct_r.risk_score);
+        assert!(second_r
+            .flags
+            .iter()
+            .any(|f| f == "FUNDING_CHAIN_LABELED:hop2"));
+        assert!(!second_r.flags.contains(&"FUNDED_BY_LABELED".to_string()));
     }
 
     #[test]

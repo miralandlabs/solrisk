@@ -9,55 +9,30 @@ transaction for drainers, trace fund flows across hops, assess LP/deployer rug d
 curated labels. **Charge for the non-DIY-able verdict, not the primitive.** Keep the
 "measured-or-null, never synthesized" integrity — it is solrisk's credibility with agents.
 
-## Roadmap (prioritized by value-per-effort)
+## Shipped (v0.3.0)
 
-### P0 — `tx-risk` as pre-sign screening  ← the categorical jump (in progress, v0.3.0)
-Turn the reserved `501` route into a real SKU. Input a base64 **unsigned** transaction; return
-`SIGN / REVIEW / BLOCK` **before the agent signs**. Moves solrisk from "reputation lookup"
-(nice-to-have) to "loss prevention" (must-have). Worth **$0.25–$0.50**; needs zero label coverage.
+- **tx-risk — pre-sign screening** (new SKU, $0.25; scoring v2.1.0). Returns
+  `SIGN`/`REVIEW`/`BLOCK` before an agent signs — "loss prevention", not "reputation lookup".
+  Deterministic static verdict (deny-listed programs & SPL Token `SetAuthority` → `BLOCK`;
+  delegations, closes, unlabeled programs, lookup-table visibility → `REVIEW`) plus
+  best-effort `simulateTransaction` disclosure (`WOULD_FAIL`, net SOL & SPL-token balance
+  changes), escalating **only** value that leaves through an opaque program.
+- **wallet-risk — real fund-flow** (scoring v1.3.0), replacing the
+  `funding_source_from_sigs` heuristic that traced nothing:
+  - **Multi-hop provenance** — traces the funder chain up to `SOLRISK_MAX_FUNDER_HOPS`
+    (default 3); a deny-labeled source → `FUNDED_BY_LABELED` (direct) or
+    `FUNDING_CHAIN_LABELED:hop{n}` (deeper, weighted by distance).
+  - **Counterparty exposure** — parses recent (30d) txns (`SOLRISK_MAX_TX_PARSE`, default 20)
+    for real `unique_counterparties_30d` + `program_diversity_30d` and `COUNTERPARTY_LABELED`.
+  - Bounded + best-effort; anything it can't establish is reported (`partial_history`,
+    `null`), never guessed.
 
-- **v1 (this release) — deterministic static instruction screening** (no simulation; reliable):
-  decode the tx, and per instruction flag —
-  - program id on the **deny list** (known drainer/scam program) → `BLOCK`
-  - SPL Token **SetAuthority** (owner/close/mint authority handoff) → `BLOCK`
-  - SPL Token **Approve/ApproveChecked** (delegation to a non-system delegate) → `REVIEW`
-  - **CloseAccount** with rent to a third party → `REVIEW`
-  - unknown/unlabeled program touched → contributes to `REVIEW`
-  - subject = fee payer (or `?owner=` override); honest `simulated: false`.
-- **v1.1 — simulation enrichment (shipped, v0.3.0):** best-effort `simulateTransaction`
-  discloses `WOULD_FAIL` (tx reverts) and the subject's **net SOL change**; a simulated
-  outflow *through an opaque program* escalates to REVIEW (`OUTFLOW_VIA_UNKNOWN_PROGRAM`),
-  while legitimate sends are never flagged. RPC-unavailable falls back to the static verdict.
-- **v1.2 — token-balance deltas (shipped, v0.3.0):** simulation also measures the subject's
-  SPL-token balance changes (bounded to the token accounts the tx touches) →
-  `net_token_changes`. A token outflow *through an opaque program* escalates
-  (`TOKEN_OUTFLOW_VIA_UNKNOWN_PROGRAM`); a legitimate token send is not. Token-2022 accounts
-  are the next follow-up.
-- Input: `?transaction=<base64>` (pre-sign, primary). `?signature=` (post-hoc forensics via
-  `getParsedTransaction`) is a later, lower-value slice.
+## Roadmap
 
-### P1 — make `funding_source_risk` real (fund-flow graph)
-The old `funding_source_from_sigs(tx_count, age_days, first_seen_ts)` heuristic **traced
-nothing**. This is the AML moat. **Lifts wallet-risk → $0.25.**
-
-- **P1 v1 — direct funder trace (shipped, v0.3.0):** once signature pagination reaches the
-  wallet's **genesis** tx, fetch it, extract the original funder (largest SOL sender to the
-  wallet in its first tx), and deny-label-check them. Real classifications replace the
-  heuristic: `no_history` | `partial_history` | `genesis_untraceable` | `labeled_bad` |
-  `traced_clean`; a deny-labeled funder adds `FUNDED_BY_LABELED`. Honest: partial history or
-  an unmappable (lookup-table) genesis is reported, never guessed.
-- **P1.2 — counterparty exposure (shipped, v0.3.0):** parses a bounded window of recent
-  (30d) txns (env `SOLRISK_MAX_TX_PARSE`, default 20) for real `unique_counterparties_30d`
-  + `program_diversity_30d` (no longer `null`) and deny-labeled counterparty exposure
-  (`COUNTERPARTY_LABELED` +30 — "who does this wallet deal with"). Best-effort; a tx that
-  can't be mapped (lookup tables) is skipped, not guessed. Scoring → v1.3.0.
-- **P1.1 — multi-hop (shipped, v0.3.0):** walks up to `SOLRISK_MAX_FUNDER_HOPS` (default 3)
-  hops back — each hop paginates that address to its genesis (`SOLRISK_FUNDER_HOP_PAGES`,
-  default 3) and extracts its funder; every hop is deny-checked. Surfaces `funding_chain`;
-  a labeled hop ≥ 2 adds `FUNDING_CHAIN_LABELED:hop{n}` with weight diluting by distance
-  (hop2 +25, hop3 +15). Stops early at a labeled or untraceable hop — never guesses.
-- **Follow-ups:** parallelize the P1.2 getTransaction fan-out (currently sequential,
-  bounded); Token-2022 in the tx-risk sim; `% inflow from labeled-bad` weighting.
+**Near-term follow-ups**
+- Token-2022 balance deltas in the tx-risk sim.
+- Parallelize the wallet-risk `getTransaction` fan-out (sequential + bounded today) — latency.
+- `% inflow from labeled-bad` weighting; optional `?signature=` post-hoc tx forensics.
 
 ### P2 — complete `token-risk` rug depth
 Add LP pool discovery + **lock/burn** status + depth-vs-mcap; **deployer history** (serial-rugger
@@ -78,13 +53,13 @@ Batch scoring (N subjects per call), watchlists + webhooks ("alert if this walle
 mixer / crosses HIGH") → subscription. Raises ARPU and stickiness.
 
 ## Pricing map
-| SKU | v0.2.2 | Target | Justification |
-|---|---|---|---|
-| tx-risk (pre-sign) | 501 | **$0.25–$0.50** | prevents direct loss; can't DIY |
-| wallet-risk | $0.05 | $0.25 | real fund-flow graph + labels |
-| token-risk | $0.10 | $0.25 | LP + deployer + honeypot |
-| signed attestation | — | premium | reusable proof-of-diligence |
-| batch / watchlist | — | subscription | value-dense / recurring |
+| SKU | Now | Note |
+|---|---|---|
+| tx-risk (pre-sign) | **$0.25** (shipped) | prevents direct loss; can't DIY |
+| wallet-risk | $0.05 | fund-flow now real → reprice to $0.25 |
+| token-risk | $0.10 (beta) | P2 (LP + deployer) to justify $0.25 |
+| signed attestation | — (P3) | reusable proof-of-diligence |
+| batch / watchlist | — (P5) | value-dense / recurring |
 
 ## Guardrails
 - **Measured-or-null**, never synthesized. A pre-sign verdict must never claim certainty it can't back.
@@ -93,4 +68,5 @@ mixer / crosses HIGH") → subscription. Raises ARPU and stickiness.
 - Everything **additive** to the public contract; existing response fields stay.
 
 ## Sequence
-P0 (tx-risk) → P1 (fund-flow) deliver the biggest agent value and justify the repricing; P2–P5 compound it.
+tx-risk + fund-flow (shipped) delivered the biggest agent value. Next: reprice wallet-risk,
+then P2 (token-risk depth) → P3–P5 compound it.

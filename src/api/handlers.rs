@@ -6,12 +6,14 @@ use crate::api::common::{
 };
 use crate::auth::dual::{authenticate_data_route, DataAuth};
 use crate::constants::API_VERSION;
-use crate::pricing::{self, ENDPOINT_TOKEN_RISK, ENDPOINT_WALLET_RISK};
+use crate::pricing::{self, ENDPOINT_TOKEN_RISK, ENDPOINT_TX_RISK, ENDPOINT_WALLET_RISK};
 use crate::scoring;
 use crate::scoring_token;
+use crate::scoring_tx;
 use crate::signals::chain;
 use crate::signals::labels;
 use crate::signals::token;
+use crate::signals::tx;
 use crate::state::AppState;
 use crate::x402::models::ResourceInfo;
 use chrono::Utc;
@@ -437,23 +439,103 @@ pub async fn handle_token_risk(
     ok_with_payment(body, settlement_from_auth(&auth))
 }
 
+/// Pre-sign transaction screening: decode a base64 **unsigned** transaction and return a
+/// `SIGN / REVIEW / BLOCK` verdict *before* the agent signs. Static instruction analysis
+/// only (no RPC in v1), so once the tx decodes the verdict is deterministic. Optional
+/// `owner` overrides the subject (default: fee payer).
 pub async fn handle_tx_risk(
-    _headers: &HeaderMap,
+    headers: &HeaderMap,
     query: &str,
-    _state: Arc<AppState>,
+    state: Arc<AppState>,
 ) -> Response<Body> {
-    let signature = extract_query_param(query, "signature");
-    if signature.is_empty() || signature.len() < 80 {
+    let transaction = extract_query_param(query, "transaction");
+    if transaction.is_empty() {
         return error_response(
             400,
             "BAD_REQUEST",
-            "Query parameter `signature` is required (base58 tx signature).",
+            "Query parameter `transaction` is required (base64 unsigned Solana transaction).",
+        );
+    }
+    // Cheap pre-auth sanity: reject non-base64 garbage before charging. Full
+    // deserialization happens after payment (below).
+    if !tx::base64_ok(transaction) {
+        return error_response(
+            400,
+            "BAD_REQUEST",
+            "Query parameter `transaction` must be base64 (standard or url-safe).",
         );
     }
 
-    error_response(
-        501,
-        "NOT_IMPLEMENTED",
-        "tx-risk is not available yet (planned v2.1 with getParsedTransaction). No payment required.",
-    )
+    let cluster = state.config.cluster_label();
+    let resource = ResourceInfo {
+        url: state
+            .config
+            .x402_resource_url_for_request(headers, "/api/v1/tx-risk", query),
+        description: pricing::resource_description(ENDPOINT_TX_RISK).to_string(),
+        mime_type: "application/json".to_string(),
+    };
+
+    let auth = match authenticate_data_route(&state, headers, ENDPOINT_TX_RISK, resource).await {
+        Ok(a) => a,
+        Err(e) => return handle_auth_error(e),
+    };
+
+    // Full deserialize post-payment. On failure, return the settlement proof so the
+    // buyer can reconcile (they paid; the input just wasn't a decodable transaction).
+    let decoded = match tx::decode_tx(transaction) {
+        Ok(t) => t,
+        Err(e) => {
+            return error_response_with_settlement(
+                422,
+                "INVALID_TRANSACTION",
+                &format!("Could not decode transaction: {e}"),
+                &auth,
+            );
+        }
+    };
+
+    let owner = extract_query_param(query, "owner");
+    let owner_override = (!owner.is_empty()).then_some(owner);
+
+    // Static screen is pure-CPU — always available. Simulation (v1.1) enriches it
+    // best-effort: on any RPC failure we keep the deterministic static verdict.
+    let mut signals = tx::analyze(&decoded, owner_override);
+    let sim = tx::simulate(&state.rpc_client, &decoded, signals.subject.as_deref()).await;
+    signals.simulated = sim.simulated;
+    signals.simulation_error = sim.error;
+    signals.net_sol_change_lamports = sim.net_sol_change_lamports;
+    signals.net_token_changes = sim.net_token_changes;
+    let result = scoring_tx::score_tx(&signals);
+
+    let mut body = serde_json::json!({
+        "api_version": API_VERSION,
+        "subject": result.signals.subject,
+        "fee_payer": result.signals.fee_payer,
+        "risk_domain": result.risk_domain,
+        "risk_score": result.risk_score,
+        "risk_band": result.risk_band,
+        "checked_at": Utc::now().to_rfc3339(),
+        "signals": result.signals,
+        "flags": result.flags,
+        "confidence": result.confidence,
+        "signal_quality": result.signal_quality,
+        "scoring_version": result.scoring_version,
+    });
+    if let Some(obj) = body.as_object_mut() {
+        for (k, v) in envelope_fields(cluster, result.recommendation, false, None)
+            .as_object()
+            .unwrap()
+        {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+
+    tracing::info!(
+        subject = ?result.signals.subject,
+        band = result.risk_band,
+        recommendation = result.recommendation,
+        instructions = result.signals.instruction_count,
+        "tx-risk screened"
+    );
+    ok_with_payment(body, settlement_from_auth(&auth))
 }

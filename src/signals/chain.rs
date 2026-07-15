@@ -14,8 +14,9 @@ pub struct ChainSignals {
     pub age_days: u64,
     pub tx_count_total: u64,
     pub tx_count_30d: u64,
-    /// `null` unless derived from parsed transactions
-    /// (`counterparty_metrics_estimated == false`). Never synthesized.
+    /// Distinct non-program addresses with a balance change in recent parsed txns — a proxy
+    /// that also counts token accounts / PDAs (upper bound on distinct wallets). `null`
+    /// unless measured (`counterparty_metrics_estimated == false`). Never synthesized.
     pub unique_counterparties_30d: Option<u64>,
     pub sol_balance_lamports: u64,
     pub spl_account_count: u64,
@@ -23,7 +24,18 @@ pub struct ChainSignals {
     /// `null` unless derived from parsed transactions. Never synthesized.
     pub program_diversity_30d: Option<u64>,
     pub is_fresh_funded: bool,
+    /// Real fund-flow classification (P1): `no_history` | `partial_history` |
+    /// `genesis_untraceable` | `labeled_bad` | `traced_clean`.
     pub funding_source_risk: String,
+    /// Original funder (base58) when the genesis tx was reached + mapped. Never guessed.
+    pub funder: Option<String>,
+    /// Deny-label hits on the funder (empty = clean or unknown).
+    pub funder_labels: Vec<crate::signals::tx::TxLabelHit>,
+    /// Multi-hop funder chain (P1.1), hop 1..N. Empty when not traced.
+    pub funding_chain: Vec<crate::signals::funding::FundingHop>,
+    /// Deny-labeled recent counterparties (P1.2) — addresses this wallet transacted with
+    /// that are on the deny list. Empty = clean or not measured.
+    pub counterparty_labels: Vec<crate::signals::tx::TxLabelHit>,
     pub first_seen_ts: i64,
     pub latest_tx_ts: i64,
     /// Counterparty/program counts are estimated without parsed transactions.
@@ -44,6 +56,10 @@ impl Default for ChainSignals {
             program_diversity_30d: None,
             is_fresh_funded: false,
             funding_source_risk: "not_checked".to_string(),
+            funder: None,
+            funder_labels: Vec::new(),
+            funding_chain: Vec::new(),
+            counterparty_labels: Vec::new(),
             first_seen_ts: 0,
             latest_tx_ts: 0,
             counterparty_metrics_estimated: true,
@@ -57,20 +73,6 @@ fn max_sig_pages() -> u32 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(5)
-}
-
-fn funding_source_from_sigs(tx_count: u64, age_days: u64, first_seen_ts: i64) -> String {
-    if tx_count == 0 {
-        return "no_history".to_string();
-    }
-    if age_days < 1 && tx_count < 5 {
-        return "fresh_unknown".to_string();
-    }
-    if first_seen_ts > 0 {
-        "untraced".to_string()
-    } else {
-        "insufficient_data".to_string()
-    }
 }
 
 pub async fn collect_chain_signals(
@@ -114,6 +116,9 @@ pub async fn collect_chain_signals(
     let mut before: Option<solana_sdk::signature::Signature> = None;
     let max_pages = max_sig_pages();
     let mut pages_fetched: u32 = 0;
+    // True once a page returns < 100 sigs — i.e. we've paginated back to the wallet's
+    // first transaction. Required before we can honestly trace the original funder.
+    let mut reached_genesis = false;
 
     for page in 0..max_pages {
         let rpc_sig = Arc::clone(rpc);
@@ -143,6 +148,7 @@ pub async fn collect_chain_signals(
                 }
                 all_sigs.extend(sigs);
                 if is_last {
+                    reached_genesis = true;
                     break;
                 }
             }
@@ -185,24 +191,65 @@ pub async fn collect_chain_signals(
     };
 
     let is_fresh_funded = age_days < 1 && tx_count_total < 5;
-    let funding_source_risk = funding_source_from_sigs(tx_count_total, age_days, first_seen_ts);
 
-    // Counterparty / program metrics require parsed transactions (P1).
-    // Until then they are reported as null, never synthesized from tx counts.
+    // P1 fund-flow trace: the wallet's oldest signature is the last one collected once we
+    // reached genesis. Best-effort — never guesses a funder it didn't observe.
+    let earliest_sig = if reached_genesis {
+        all_sigs.last().map(|s| s.signature.as_str())
+    } else {
+        None
+    };
+    let trace =
+        crate::signals::funding::trace_funder(rpc, &pubkey, earliest_sig, reached_genesis).await;
+
+    // P1.2: parse a bounded window of recent (30d) txns for real counterparty / program
+    // metrics + deny-labeled counterparty exposure. Best-effort — falls back to null.
+    let recent_sigs: Vec<String> = all_sigs
+        .iter()
+        .filter(|s| {
+            s.block_time
+                .map(|bt| bt >= thirty_days_ago)
+                .unwrap_or(false)
+        })
+        .map(|s| s.signature.clone())
+        .collect();
+    let activity = crate::signals::activity::analyze_recent_activity(
+        rpc,
+        &pubkey,
+        &recent_sigs,
+        crate::signals::activity::max_tx_parse(),
+    )
+    .await;
+
+    let (unique_counterparties_30d, program_diversity_30d, counterparty_metrics_estimated) =
+        if activity.measured {
+            (
+                Some(activity.unique_counterparties),
+                Some(activity.program_diversity),
+                false,
+            )
+        } else {
+            (None, None, true)
+        };
+
     Ok(ChainSignals {
         age_days,
         tx_count_total,
         tx_count_30d,
-        unique_counterparties_30d: None,
+        unique_counterparties_30d,
         sol_balance_lamports: sol_balance,
         spl_account_count,
         has_activity_48h,
-        program_diversity_30d: None,
+        program_diversity_30d,
         is_fresh_funded,
-        funding_source_risk,
+        funding_source_risk: trace.classification,
+        funder: trace.funder,
+        funder_labels: trace.funder_labels,
+        funding_chain: trace.funding_chain,
+        counterparty_labels: activity.counterparty_labels,
         first_seen_ts,
         latest_tx_ts,
-        counterparty_metrics_estimated: true,
+        counterparty_metrics_estimated,
         sig_pages_fetched: pages_fetched,
     })
 }

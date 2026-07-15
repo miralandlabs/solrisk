@@ -10,8 +10,9 @@ pub const TIER_MONTHLY: &str = "monthly";
 
 pub const ALL_TIERS: &[&str] = &[TIER_HOURLY, TIER_DAILY, TIER_MONTHLY];
 
-/// Paid data routes (tx-risk gated 501 until v2.1).
-pub const PER_CALL_ENDPOINTS: &[&str] = &[ENDPOINT_WALLET_RISK, ENDPOINT_TOKEN_RISK];
+/// Paid data routes. tx-risk is a billable SKU as of v0.3.0 (pre-sign screening).
+pub const PER_CALL_ENDPOINTS: &[&str] =
+    &[ENDPOINT_WALLET_RISK, ENDPOINT_TOKEN_RISK, ENDPOINT_TX_RISK];
 
 /// Parameters table endpoint key for subscribe tiers (matches subscription-starter).
 pub fn subscribe_endpoint_key(tier: &str) -> String {
@@ -45,15 +46,22 @@ pub fn sample_query_for_endpoint(endpoint: &str) -> &'static str {
     match endpoint {
         ENDPOINT_WALLET_RISK => "wallet=11111111111111111111111111111112",
         ENDPOINT_TOKEN_RISK => "mint=So11111111111111111111111111111111111111112",
-        ENDPOINT_TX_RISK => "signature=111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+        // Format-valid base64 so the SRM probe reaches the 402 gate (full tx decode is post-payment).
+        ENDPOINT_TX_RISK => "transaction=c29scmlzay1wcm9iZQ==",
         _ => "tier=hourly",
     }
 }
 
 pub fn default_legacy_usdc(endpoint: &str) -> f64 {
+    // Fallback used only when neither the parameters table nor an env amount is set.
+    // Keep in sync with migrations/parameters-seed-mainnet.sql.
     match endpoint {
+        // tx-risk (pre-sign loss prevention) — the premium, value-dense SKU.
+        ENDPOINT_TX_RISK => 0.30,
+        // wallet-risk — real multi-hop fund-flow + counterparty AML (no longer commodity stats).
+        ENDPOINT_WALLET_RISK => 0.25,
+        // token-risk — held at beta pricing until P2 (LP/deployer depth).
         ENDPOINT_TOKEN_RISK => 0.10,
-        ENDPOINT_WALLET_RISK | ENDPOINT_TX_RISK => 0.05,
         _ if endpoint.contains("subscribe/monthly") => 25.0,
         _ if endpoint.contains("subscribe/daily") => 5.0,
         _ if endpoint.contains("subscribe/hourly") => 1.0,

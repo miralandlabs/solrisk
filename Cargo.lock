@@ -6169,7 +6169,7 @@ dependencies = [
 
 [[package]]
 name = "solrisk"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6186,6 +6186,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_qs",
+ "solana-account-decoder-client-types",
  "solana-client",
  "solana-commitment-config",
  "solana-compute-budget-interface",

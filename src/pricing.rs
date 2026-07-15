@@ -53,11 +53,15 @@ pub fn sample_query_for_endpoint(endpoint: &str) -> &'static str {
 }
 
 pub fn default_legacy_usdc(endpoint: &str) -> f64 {
+    // Fallback used only when neither the parameters table nor an env amount is set.
+    // Keep in sync with migrations/parameters-seed-mainnet.sql.
     match endpoint {
-        // tx-risk (pre-sign loss prevention) is value-dense — priced to clear the fee floor.
-        ENDPOINT_TX_RISK => 0.25,
+        // tx-risk (pre-sign loss prevention) — the premium, value-dense SKU.
+        ENDPOINT_TX_RISK => 0.30,
+        // wallet-risk — real multi-hop fund-flow + counterparty AML (no longer commodity stats).
+        ENDPOINT_WALLET_RISK => 0.25,
+        // token-risk — held at beta pricing until P2 (LP/deployer depth).
         ENDPOINT_TOKEN_RISK => 0.10,
-        ENDPOINT_WALLET_RISK => 0.05,
         _ if endpoint.contains("subscribe/monthly") => 25.0,
         _ if endpoint.contains("subscribe/daily") => 5.0,
         _ if endpoint.contains("subscribe/hourly") => 1.0,

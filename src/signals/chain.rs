@@ -14,8 +14,9 @@ pub struct ChainSignals {
     pub age_days: u64,
     pub tx_count_total: u64,
     pub tx_count_30d: u64,
-    /// `null` unless derived from parsed transactions
-    /// (`counterparty_metrics_estimated == false`). Never synthesized.
+    /// Distinct non-program addresses with a balance change in recent parsed txns — a proxy
+    /// that also counts token accounts / PDAs (upper bound on distinct wallets). `null`
+    /// unless measured (`counterparty_metrics_estimated == false`). Never synthesized.
     pub unique_counterparties_30d: Option<u64>,
     pub sol_balance_lamports: u64,
     pub spl_account_count: u64,

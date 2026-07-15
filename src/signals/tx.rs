@@ -32,6 +32,7 @@ pub const OUTFLOW_LAMPORTS_THRESHOLD: i64 = 10_000_000;
 
 /// Well-known programs that are expected in benign transactions.
 const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
+const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const ATA_PROGRAM: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 const COMPUTE_BUDGET_PROGRAM: &str = "ComputeBudget111111111111111111111111111111";
@@ -70,6 +71,8 @@ pub struct TxSignals {
     /// On-chain simulation error — the tx would fail if signed. `None` = ran clean or not simulated.
     pub simulation_error: Option<String>,
     /// Subject's net SOL change from simulation, in lamports (negative = outflow). v1.1.
+    /// Includes the tx fee when the subject is the fee payer (well below the escalation
+    /// threshold, so scoring is unaffected — it just makes the disclosed figure exact).
     pub net_sol_change_lamports: Option<i64>,
     /// Per-mint net token changes for the subject's touched token accounts (v1.2).
     /// Negative `delta_raw` = outflow. Empty when not simulated or no token accounts touched.
@@ -89,7 +92,7 @@ pub struct TxSignals {
 
 fn is_known_safe(program: &str) -> bool {
     program == SYSTEM_PROGRAM
-        || program == spl_token::id().to_string()
+        || program == SPL_TOKEN_PROGRAM
         || program == TOKEN_2022_PROGRAM
         || program == ATA_PROGRAM
         || program == COMPUTE_BUDGET_PROGRAM
@@ -170,7 +173,7 @@ pub fn analyze(tx: &VersionedTransaction, owner_override: Option<&str>) -> TxSig
             });
         }
 
-        if program == spl_token::id().to_string() || program == TOKEN_2022_PROGRAM {
+        if program == SPL_TOKEN_PROGRAM || program == TOKEN_2022_PROGRAM {
             if let Ok(token_ix) = TokenInstruction::unpack(&ix.data) {
                 match token_ix {
                     TokenInstruction::SetAuthority { authority_type, .. } => {
@@ -302,10 +305,14 @@ pub async fn simulate(
     match rpc.simulate_transaction_with_config(tx, cfg).await {
         Ok(resp) => {
             let error = resp.value.err.map(|e| format!("{e:?}"));
-            let accounts = resp.value.accounts.unwrap_or_default();
             // Sim returns accounts in the requested order: [subject, touched tokens...].
-            let post_sol = accounts
-                .first()
+            // Keep the `Option`: `None`/a short vec means the node returned no account
+            // states — NOT that a balance is zero. We must never infer a drain from missing
+            // data (that would fabricate a `TOKEN_OUTFLOW_VIA_UNKNOWN_PROGRAM`).
+            let sim_accounts = resp.value.accounts;
+            let post_sol = sim_accounts
+                .as_ref()
+                .and_then(|a| a.first())
                 .and_then(|o| o.as_ref())
                 .map(|ui| ui.lamports);
             let net_sol_change_lamports = match (pre_sol, post_sol) {
@@ -313,22 +320,25 @@ pub async fn simulate(
                 _ => None,
             };
 
-            let mut net_token_changes = Vec::new();
-            for (i, (_, mint, pre)) in touched.iter().enumerate() {
-                let post = accounts
-                    .get(i + 1)
-                    .and_then(|o| o.as_ref())
-                    .and_then(|ui| parse_token_account(&ui.data))
-                    .map(|(_, amt)| amt)
-                    .unwrap_or(0); // account closed/emptied in the tx → 0
-                let delta = post as i64 - *pre as i64;
-                if delta != 0 {
-                    net_token_changes.push(TokenChange {
-                        mint: mint.clone(),
-                        delta_raw: delta,
-                    });
-                }
-            }
+            // Per touched token: `None` = node didn't return that slot (unmeasured → skip);
+            // `Some(0)` = the slot came back null (account closed in the tx → real zero);
+            // otherwise the parsed post amount.
+            let posts: Vec<Option<u64>> = touched
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    sim_accounts
+                        .as_ref()
+                        .and_then(|a| a.get(i + 1))
+                        .map(|slot| {
+                            slot.as_ref()
+                                .and_then(|ui| parse_token_account(&ui.data))
+                                .map(|(_, amt)| amt)
+                                .unwrap_or(0)
+                        })
+                })
+                .collect();
+            let net_token_changes = compute_token_deltas(&touched, &posts);
 
             SimOutcome {
                 simulated: true,
@@ -342,6 +352,26 @@ pub async fn simulate(
     }
 }
 
+/// Net token change = `post − pre` per touched account. A `None` post (the node did not
+/// return that account's state) is **skipped**, never treated as a zero balance — so a
+/// missing sim result can't fabricate an outflow.
+fn compute_token_deltas(
+    touched: &[(String, String, u64)],
+    posts: &[Option<u64>],
+) -> Vec<TokenChange> {
+    touched
+        .iter()
+        .zip(posts)
+        .filter_map(|((_, mint, pre), post)| {
+            let delta = (*post)? as i64 - *pre as i64;
+            (delta != 0).then(|| TokenChange {
+                mint: mint.clone(),
+                delta_raw: delta,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +382,28 @@ mod tests {
 
     fn b64(tx: &VersionedTransaction) -> String {
         base64::engine::general_purpose::STANDARD.encode(bincode::serialize(tx).unwrap())
+    }
+
+    /// Guard against a typo in the hardcoded program-id constants.
+    #[test]
+    fn spl_token_const_matches_crate_id() {
+        assert_eq!(SPL_TOKEN_PROGRAM, spl_token::id().to_string());
+    }
+
+    /// A missing sim post-state must NOT be read as a drain; a null slot (closed) is a real zero.
+    #[test]
+    fn token_deltas_skip_unmeasured_but_report_closed() {
+        let touched = vec![
+            ("acct1".to_string(), "MintA".to_string(), 100u64),
+            ("acct2".to_string(), "MintB".to_string(), 50u64),
+        ];
+        // Node returned no account states → no fabricated outflow.
+        assert!(compute_token_deltas(&touched, &[None, None]).is_empty());
+        // acct1 closed (Some(0)) → −100 outflow; acct2 unchanged (Some(50)) → skipped.
+        let d = compute_token_deltas(&touched, &[Some(0), Some(50)]);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].mint, "MintA");
+        assert_eq!(d[0].delta_raw, -100);
     }
 
     /// A plain SOL transfer touches only the System program → no findings.

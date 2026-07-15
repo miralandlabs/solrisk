@@ -1,7 +1,7 @@
 //! Dual auth: Bearer JWT (subscription) or per-call x402.
 
 use http::HeaderMap;
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::db::ParametersDb;
 use crate::state::AppState;
@@ -122,7 +122,15 @@ async fn verify_bearer(state: &AppState, token: &str) -> Result<DataAuth, DataAu
                 });
             }
             Ok(false) => {}
-            Err(e) => warn!(error = %e, "revocation check failed; allowing"),
+            // Fail CLOSED: a subscription we cannot confirm is un-revoked is treated as
+            // invalid. Revocation must be authoritative — never serve a JWT we can't verify.
+            Err(e) => {
+                error!(error = %e, "revocation check failed; denying (fail-closed)");
+                return Err(DataAuthError::Unauthorized {
+                    code: "REVOCATION_UNVERIFIED",
+                    message: "Could not verify subscription status; please retry".into(),
+                });
+            }
         }
     }
 

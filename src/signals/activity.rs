@@ -25,6 +25,9 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct ActivityMetrics {
+    /// Distinct non-program addresses with a SOL balance change across parsed txns — a
+    /// proxy for "counterparties" that also includes token accounts / PDAs, so it is an
+    /// upper bound on the number of distinct *wallets* dealt with.
     pub unique_counterparties: u64,
     pub program_diversity: u64,
     /// Distinct counterparties that are on the deny list.
